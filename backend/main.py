@@ -3,7 +3,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import logging
 import os
+from urllib.parse import urlparse
 
 from routers.sos import router as sos_router
 from routers.companion import router as companion_router
@@ -33,18 +35,51 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Aegis Backend", version="0.1.0", lifespan=lifespan)
 
-# CORS: allow the Next.js dev server and future deployed frontend.
-# Tighten ALLOWED_ORIGINS in .env before deploying past hackathon/demo stage.
-configured_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
-allowed_origins = (
-    [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
-    if configured_origins
-    else ["http://localhost:3000", "http://127.0.0.1:3000"]
-)
+logger = logging.getLogger("aegis.cors")
+
+DEV_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
+def _normalize_origin(raw: str) -> str | None:
+    """Return a canonical scheme://host[:port] origin, or None if it is not one."""
+    origin = raw.strip().rstrip("/")
+    if not origin or "*" in origin:
+        return None
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_production() -> bool:
+    return os.getenv("APP_ENV", "development").strip().casefold() in {"production", "prod"}
+
+
+def _resolve_allowed_origins() -> list[str]:
+    """Explicit origins only. Production never falls back to the dev origins."""
+    configured = os.getenv("ALLOWED_ORIGINS", "").strip()
+    origins: list[str] = []
+    for entry in configured.split(",") if configured else []:
+        origin = _normalize_origin(entry)
+        if origin is None:
+            if entry.strip():
+                logger.warning("Ignoring invalid ALLOWED_ORIGINS entry: %r", entry.strip())
+            continue
+        if origin not in origins:
+            origins.append(origin)
+    if origins:
+        return origins
+    if _is_production():
+        logger.error(
+            "APP_ENV=production without a valid ALLOWED_ORIGINS list; "
+            "cross-origin browser requests will be blocked."
+        )
+        return []
+    return list(DEV_ORIGINS)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=_resolve_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

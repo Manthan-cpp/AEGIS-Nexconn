@@ -29,3 +29,7 @@ env/
 *.bak
 *.orig
 plan.md
+aegis.zip
+
+# Local scratch input files
+.qoder-input-*/
