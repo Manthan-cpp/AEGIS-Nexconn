@@ -279,7 +279,15 @@ EMAIL_QUEUE_DB_PATH=data/email_queue.sqlite3
 EMAIL_QUEUE_WORKER_ENABLED=true
 
 # CORS Configuration
+# development (default) also trusts the two localhost origins below.
+# production trusts only ALLOWED_ORIGINS, so list every frontend origin.
+APP_ENV=development
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Nexconn Chat (required only for private messages)
+# App Key is public, App Secret stays server-side. Default data center is SG.
+NEXCONN_APP_KEY=your_app_key
+NEXCONN_APP_SECRET=your_app_secret
 ```
 
 Start the backend server on **port 8123**:

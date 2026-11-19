@@ -14,7 +14,7 @@ Filled in incrementally as phases complete.
 - The root screen is the calculator disguise. `app/(stealth)/page.tsx` owns a small client-side mode switch between the calculator and the revealed Aegis view.
 - The revealed view is a component at `app/(main)/main-app.tsx`, rather than a second page route. This is deliberate: Next.js route groups do not change URL paths, so keeping both screens in one client-side shell preserves the plan's no-visible-URL-change behavior.
 - The calculator is fully local. Its expression parser uses tokenization and operator precedence; it does not use `eval` and does not contact the backend.
-- Phase 1 stores the unlock code in browser `localStorage` under `aegis.unlock-code`, falling back to the demo code `2580`. This is only a disguise trigger, not a security boundary. Phase 6 will replace it with an authenticated per-user setting.
+- Phase 1 stores the unlock code in browser `localStorage` under `aegis.unlock-code`, falling back to the demo code `2580`. This is only a disguise trigger, not a security boundary. Moving it to an authenticated per-user setting is still not implemented.
 - Panic exit unmounts the private view and returns to the calculator through either the `Quick exit` button or `Escape`. Because the private view is unmounted, its in-memory UI state is discarded.
 
 ## Next boundary
@@ -74,15 +74,18 @@ companion memory.
 - `backend/services/cases.py` stores cases in MongoDB's `sos_cases`
   collection and uses a labeled local-demo fallback when MongoDB is unavailable.
 - `frontend/app/(main)/responder-flow.tsx` provides upload, review, save, and
-  recent-case queue views. It is intentionally not authenticated until Phase 6.
+  recent-case queue views. It is still unauthenticated: Clerk currently gates
+  only private messaging, so the dashboard accepts any request.
 - The live handoff test decoded an SOS, classified it as high, saved it to MongoDB,
   verified it appeared first, and removed the temporary test record afterward.
 
 ## Next boundary
 
-Phase 6 will add Clerk authentication and access control. It must protect the
-responder dashboard and replace the shared demo access with explicit responder
-identity and linked-case permissions.
+Clerk sign-in is already wired, guest-first: `frontend/proxy.ts` runs
+`clerkMiddleware`, `/dm/*` and `/nexconn/token` require a valid Clerk token, and
+every other tool still works as a guest. What remains from the original "Phase 6"
+scope is protecting the responder dashboard and the companion session-delete
+endpoint, which today accept unauthenticated requests.
 
 ## Phase 7 status — data model and integration pass
 
@@ -105,9 +108,9 @@ identity and linked-case permissions.
 
 ## Next boundary
 
-Phase 6 authentication remains intentionally deferred by product decision. The
-next planned work after the hackathon decision is either Clerk access control or
-Phase 8 UI polish and accessibility.
+Private messaging has since moved to Nexconn (see below) and Clerk sign-in is
+live for that tool. The responder dashboard and companion session deletion are
+still unauthenticated and are the remaining access-control work.
 
 ## Health assistant status
 
@@ -135,3 +138,29 @@ Phase 8 UI polish and accessibility.
   - Recovers automatically via half-open probe upon cooldown expiry.
 - **Bounded In-Memory Caching**: Caches search queries for 1 hour TTL with bounded LRU eviction (max 500 entries) to conserve API quotas and optimize latency.
 
+
+## Private messaging on Nexconn
+
+- `backend/routers/nexconn.py` exposes `GET /nexconn/token` behind
+  `Depends(get_current_user)`. It rate-limits per user, caches the minted token
+  server-side, and returns the public App Key alongside a short-lived per-user
+  token.
+- `backend/services/nexconn_server.py` calls the Server API
+  (`POST /v4/auth/access-token/issue`) with a SHA1 signature built from
+  `App Secret + Nonce + Timestamp`. The App Secret never leaves the backend, and
+  Clerk user IDs are hashed into stable Nexconn-safe IDs.
+- `frontend/app/(main)/nexconn-client.ts` is the only module that imports
+  `@nexconn/chat`. It initializes the engine once, connects once per signed-in
+  account, and exposes typed helpers for channels, send, history, receipts,
+  typing and presence.
+- AEGIS no longer stores message content. `dm_realtime.py` and the custom
+  websocket stream are gone; `/dm/*` is profile and conversation bookkeeping
+  only, while messages, history and read receipts come from Nexconn.
+- Direct messages stay generic by product decision: any signed-in member can
+  start a conversation with any other member. There is no pre-linked
+  trusted-contact model.
+- Disappearing messages are enforced client-side through per-message expiry
+  metadata and a sender-side recall, because Nexconn has no native TTL for
+  direct messages.
+- CORS is explicit: with `APP_ENV=production` the backend trusts only
+  `ALLOWED_ORIGINS`, rejects wildcards, and has no localhost fallback.
