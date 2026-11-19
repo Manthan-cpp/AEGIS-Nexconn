@@ -1,9 +1,10 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, CheckCheck, Clock, MessageSquare, RefreshCw, Search, Send, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, CheckCheck, Clock, FileText, MessageSquare, Paperclip, RefreshCw, Search, Send, Trash2 } from "lucide-react";
 import { SignInButton, SignUpButton, useAuth, useUser } from "@clerk/nextjs";
 import {
+  type NexconnAttachment,
   type NexconnChannel,
   type NexconnChatMessage,
   channelIdsOf,
@@ -13,6 +14,8 @@ import {
   fetchRecentMessages,
   getOrCreateDirectChannel,
   markMessagesRead,
+  sendFile,
+  sendImage,
   sendText,
   sendTyping,
   setSessionTokenProvider,
@@ -79,11 +82,40 @@ type Message = {
   message_id: string;
   sender_id: string;
   content: string;
+  attachment?: NexconnAttachment;
   created_at: string;
   expires_at: string | null;
   is_from_me: boolean;
   read?: boolean;
 };
+
+const ATTACHMENT_ACCEPT = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+].join(",");
+
+function formatBytes(size?: number) {
+  if (typeof size !== "number" || size <= 0) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function previewOf(message: NexconnChatMessage) {
+  if (message.text) return message.text;
+  if (message.attachment?.kind === "image") return "Photo";
+  if (message.attachment) return message.attachment.name;
+  return "";
+}
 
 function toUiMessage(message: NexconnChatMessage): Message {
   const expiry = message.metadata["aegis_expires_at"];
@@ -92,6 +124,7 @@ function toUiMessage(message: NexconnChatMessage): Message {
     message_id: message.id,
     sender_id: message.senderId,
     content: message.text,
+    attachment: message.attachment,
     created_at: new Date(message.sentAt).toISOString(),
     expires_at: Number.isNaN(parsed) ? null : new Date(parsed).toISOString(),
     is_from_me: message.isFromMe,
@@ -159,6 +192,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -171,9 +205,11 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
   const [connection, setConnection] = useState<"connecting" | "ready" | "unavailable">("connecting");
   const [presence, setPresence] = useState<Record<string, boolean>>({});
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
+  const [activeChannelIds, setActiveChannelIds] = useState<string[]>([]);
   const [previews, setPreviews] = useState<Record<string, Preview>>({});
 
   const channelRef = useRef<{ channel: NexconnChannel; peerId: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const recalledRef = useRef<Set<string>>(new Set());
   const lastTypingSentRef = useRef(0);
 
@@ -281,8 +317,10 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     if (!isLoaded || !isSignedIn || !userId) return;
     let active = true;
     setSessionTokenProvider((options) => getToken(options));
-    setConnection("connecting");
-    void connect().then((result) => {
+
+    const openConnection = async () => {
+      setConnection("connecting");
+      const result = await connect();
       if (!active) return;
       if (result.ok) {
         setConnection("ready");
@@ -290,7 +328,9 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       }
       setConnection("unavailable");
       setError(result.error);
-    });
+    };
+
+    void openConnection();
     return () => { active = false; };
   }, [getToken, isLoaded, isSignedIn, userId]);
 
@@ -335,10 +375,6 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     let pollTimer: number | null = null;
     const readConfirmed = new Set<string>();
 
-    setMessages([]);
-    setNotice("");
-    setError("");
-
     const confirmRead = (incoming: NexconnChatMessage[]) => {
       if (!channel) return;
       const fresh = incoming.filter((message) => !message.isFromMe && !readConfirmed.has(message.id));
@@ -348,6 +384,10 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     };
 
     const start = async () => {
+      setMessages([]);
+      setNotice("");
+      setError("");
+
       const channelResult = await getOrCreateDirectChannel(activePeerId);
       if (!active) return;
       if (!channelResult.ok) {
@@ -356,13 +396,14 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       }
       channel = channelResult.data;
       channelRef.current = { channel, peerId: activePeerId };
+      setActiveChannelIds(channelIdsOf(channel));
 
       const handleMessage = (message: NexconnChatMessage) => {
         if (!active) return;
         setMessages((current) => mergeMessages(current, [toUiMessage(message)]));
         setPreviews((current) => ({
           ...current,
-          [activeConversationId]: { text: message.text, sentAt: message.sentAt, fromMe: message.isFromMe },
+          [activeConversationId]: { text: previewOf(message), sentAt: message.sentAt, fromMe: message.isFromMe },
         }));
         if (!message.isFromMe) {
           confirmRead([message]);
@@ -380,7 +421,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
         if (latest) {
           setPreviews((current) => ({
             ...current,
-            [activeConversationId]: { text: latest.text, sentAt: latest.sentAt, fromMe: latest.isFromMe },
+            [activeConversationId]: { text: previewOf(latest), sentAt: latest.sentAt, fromMe: latest.isFromMe },
           }));
         }
       } else {
@@ -403,6 +444,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       for (const unsubscribe of unsubscribeMessages) unsubscribe();
       if (pollTimer !== null) window.clearInterval(pollTimer);
       if (channelRef.current?.channel === channel) channelRef.current = null;
+      setActiveChannelIds([]);
       setTypingChannelId(null);
     };
   }, [activeConversationId, activePeerId, connection]);
@@ -462,7 +504,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
           if (existing && existing.sentAt >= message.sentAt) return current;
           return {
             ...current,
-            [conversation.conversation_id]: { text: message.text, sentAt: message.sentAt, fromMe: message.isFromMe },
+            [conversation.conversation_id]: { text: previewOf(message), sentAt: message.sentAt, fromMe: message.isFromMe },
           };
         });
       }),
@@ -498,8 +540,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     return [...conversations].sort((first, second) => timestamp(second) - timestamp(first));
   }, [conversations, previews]);
 
-  const typingChannelIds = channelRef.current ? channelIdsOf(channelRef.current.channel) : [];
-  const isPeerTyping = Boolean(typingChannelId && typingChannelIds.includes(typingChannelId));
+  const isPeerTyping = Boolean(typingChannelId && activeChannelIds.includes(typingChannelId));
 
   if (!isLoaded) {
     return <section className="dm-flow"><p className="dm-muted">Loading account…</p></section>;
@@ -597,10 +638,56 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       setMessages((current) => mergeMessages(current, [toUiMessage(sent.data)]));
       setPreviews((current) => ({
         ...current,
-        [selected.conversation_id]: { text: sent.data.text, sentAt: sent.data.sentAt, fromMe: true },
+        [selected.conversation_id]: { text: previewOf(sent.data), sentAt: sent.data.sentAt, fromMe: true },
       }));
     } finally {
       setIsSending(false);
+    }
+  }
+
+  async function sendAttachment(file: File | undefined) {
+    if (!file || !selected || isUploading) return;
+    const peerId = selected.recipient.nexconn_user_id;
+    if (!peerId) {
+      setError("This contact cannot receive Nexconn messages yet. Ask them to sign in once more.");
+      return;
+    }
+
+    setIsUploading(true);
+    setError("");
+    setNotice("");
+    try {
+      const channelResult = await ensureChannel(peerId);
+      if (!channelResult.ok) {
+        setError(channelResult.error);
+        return;
+      }
+
+      const metadata: Record<string, string> = { aegis_conversation_id: selected.conversation_id };
+      if (selected.disappearing_enabled) {
+        const seconds = Math.max(10, Number(selected.disappearing_seconds) || 21600);
+        metadata.aegis_expires_at = new Date(Date.now() + seconds * 1000).toISOString();
+      }
+
+      const isImage = file.type.toLowerCase().startsWith("image/");
+      const result = isImage
+        ? await sendImage(channelResult.data, file, { needReceipt: true, metadata })
+        : await sendFile(channelResult.data, file, { needReceipt: true, metadata });
+
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+
+      setNotice(isImage ? "Image sent." : "File sent.");
+      setMessages((current) => mergeMessages(current, [toUiMessage(result.data)]));
+      setPreviews((current) => ({
+        ...current,
+        [selected.conversation_id]: { text: previewOf(result.data), sentAt: result.data.sentAt, fromMe: true },
+      }));
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -841,7 +928,36 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                       }
                     } : undefined}
                   >
-                    <p>{message.content}</p>
+                    {message.attachment?.kind === "image" ? (
+                      <a
+                        className="dm-attachment-image"
+                        href={message.attachment.url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={message.attachment.thumbnail ?? message.attachment.url}
+                          alt={message.attachment.name}
+                          loading="lazy"
+                        />
+                      </a>
+                    ) : message.attachment ? (
+                      <a
+                        className="dm-attachment-file"
+                        href={message.attachment.url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        <FileText size={18} aria-hidden="true" />
+                        <span className="dm-attachment-name">{message.attachment.name}</span>
+                        {formatBytes(message.attachment.size) && (
+                          <span className="dm-attachment-size">{formatBytes(message.attachment.size)}</span>
+                        )}
+                      </a>
+                    ) : (
+                      <p>{message.content}</p>
+                    )}
                     <div className="dm-message-meta">
                       <time dateTime={message.created_at}>{message.is_from_me ? "You" : selected.recipient.display_name}</time>
                       {message.is_from_me && (
@@ -862,6 +978,25 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
               </p>
               <form className="dm-composer" onSubmit={sendMessage}>
                 <label className="sr-only" htmlFor="dm-message">Write a private message</label>
+                <input
+                  ref={fileInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept={ATTACHMENT_ACCEPT}
+                  onChange={(event) => void sendAttachment(event.target.files?.[0])}
+                  disabled={connection !== "ready" || isUploading}
+                  tabIndex={-1}
+                />
+                <button
+                  className="dm-attach-button"
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={connection !== "ready" || isUploading}
+                  aria-label="Attach an image or file"
+                  title="Attach an image or file (up to 12 MB)"
+                >
+                  <Paperclip size={16} aria-hidden="true" />
+                </button>
                 <textarea
                   id="dm-message"
                   value={draft}
@@ -871,8 +1006,8 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                   rows={3}
                   disabled={connection !== "ready"}
                 />
-                <button className="dm-primary-button" type="submit" disabled={isSending || !draft.trim() || connection !== "ready"}>
-                  {isSending ? "Sending…" : "Send message"}
+                <button className="dm-primary-button" type="submit" disabled={isSending || isUploading || !draft.trim() || connection !== "ready"}>
+                  {isUploading ? "Uploading…" : isSending ? "Sending…" : "Send message"}
                   <Send size={13} aria-hidden="true" />
                 </button>
               </form>

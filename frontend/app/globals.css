@@ -2830,7 +2830,7 @@ select:focus-visible,
 
 .dm-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px;
   padding: 14px 16px;
@@ -2841,6 +2841,69 @@ select:focus-visible,
   min-height: 52px;
   max-height: 130px;
   font-size: 14px;
+}
+
+.dm-attach-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--muted-strong);
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+
+.dm-attach-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dm-attach-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.dm-attachment-image {
+  display: block;
+}
+
+.dm-attachment-image img {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+
+.dm-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 0;
+  color: var(--foreground);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.dm-attachment-file:hover .dm-attachment-name {
+  text-decoration: underline;
+}
+
+.dm-attachment-name {
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.dm-attachment-size {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .dm-empty-state,

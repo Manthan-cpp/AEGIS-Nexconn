@@ -20,6 +20,26 @@ const TYPING_WINDOW_MS = 6_000;
 const PRESENCE_SUBSCRIPTION_SECONDS = 3_600;
 const PRESENCE_POLL_MS = 30_000;
 
+// Matches the 12 MB upload ceiling the SOS and responder routers already use.
+const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+const IMAGE_MESSAGE_TYPE = "RC:ImgMsg";
+const FILE_MESSAGE_TYPE = "RC:FileMsg";
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+]);
+const ALLOWED_FILE_TYPES = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+
 type Sdk = typeof import("@nexconn/chat");
 export type NexconnChannel = DirectChannel;
 
@@ -27,6 +47,7 @@ type RawMessage = {
   messageId: string;
   channelIdentifier: ChannelIdentifier;
   senderUserId: string;
+  messageType?: string;
   content?: unknown;
   metadata?: Map<string, string> | Record<string, string> | null;
   sentTime: number;
@@ -51,11 +72,21 @@ export type NexconnResult<T> =
 
 export type SessionTokenProvider = (options?: { skipCache?: boolean }) => Promise<string | null>;
 
+export type NexconnAttachment = {
+  kind: "image" | "file";
+  url: string;
+  name: string;
+  size?: number;
+  mime?: string;
+  thumbnail?: string;
+};
+
 export type NexconnChatMessage = {
   id: string;
   channelId: string;
   senderId: string;
   text: string;
+  attachment?: NexconnAttachment;
   sentAt: number;
   direction: "sent" | "received";
   isFromMe: boolean;
@@ -128,15 +159,58 @@ function metadataOf(message: RawMessage): Record<string, string> {
   return entries;
 }
 
-function toChatMessage(message: RawMessage): NexconnChatMessage {
-  const content = (message.content ?? {}) as { text?: unknown };
+function stringOf(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function sizeOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** Map an image/file payload to the shape the messages UI renders. */
+function attachmentOf(
+  messageType: string | undefined,
+  content: Record<string, unknown>,
+): NexconnAttachment | undefined {
+  const url = stringOf(content.remoteUrl);
+  if (!url) return undefined;
+
+  if (messageType === IMAGE_MESSAGE_TYPE) {
+    const thumbnail = stringOf(content.thumbnailBase64);
+    return {
+      kind: "image",
+      url,
+      name: stringOf(content.name) || "Image",
+      size: sizeOf(content.size),
+      mime: stringOf(content.fileType) || stringOf(content.type) || undefined,
+      // Nexconn documents the thumbnail as a bare JPG base64 string.
+      thumbnail: thumbnail ? `data:image/jpeg;base64,${thumbnail}` : undefined,
+    };
+  }
+
+  if (messageType === FILE_MESSAGE_TYPE) {
+    return {
+      kind: "file",
+      url,
+      name: stringOf(content.name) || "Attachment",
+      size: sizeOf(content.size),
+      mime: stringOf(content.fileType) || undefined,
+    };
+  }
+
+  return undefined;
+}
+
+function toChatMessage(message: RawMessage, fallbackType?: string): NexconnChatMessage {
+  const content = (message.content ?? {}) as Record<string, unknown>;
   const channelId = message.channelIdentifier?.channelId ?? "";
   const senderId = message.senderUserId ?? "";
   return {
     id: message.messageId,
     channelId,
     senderId,
-    text: typeof content.text === "string" ? content.text : "",
+    text: stringOf(content.text),
+    attachment: attachmentOf(message.messageType ?? fallbackType, content),
     sentAt: message.sentTime,
     direction: senderId && senderId === currentUserId ? "sent" : "received",
     isFromMe: Boolean(senderId) && senderId === currentUserId,
@@ -164,7 +238,7 @@ function registerMessageHandler(sdkModule: Sdk): void {
         const channelListeners = listeners.get(message.channelIdentifier.channelId);
         if (!channelListeners?.size) continue;
         const mapped = toChatMessage(message as unknown as RawMessage);
-        if (!mapped.text) continue;
+        if (!mapped.text && !mapped.attachment) continue;
         for (const listener of channelListeners) listener(mapped);
       }
     },
@@ -447,6 +521,84 @@ export async function sendText(
   }
 }
 
+async function sendMediaUpload(
+  channel: NexconnChannel,
+  file: File,
+  kind: "image" | "file",
+  options: SendOptions = {},
+): Promise<NexconnResult<NexconnChatMessage>> {
+  if (!file || file.size <= 0) return fail("Choose a non-empty image or file first.");
+  if (file.size > MAX_ATTACHMENT_BYTES) return fail("Attachments must be 12 MB or smaller.");
+
+  const mime = (file.type || "").toLowerCase();
+  const allowed = kind === "image" ? ALLOWED_IMAGE_TYPES : ALLOWED_FILE_TYPES;
+  if (!allowed.has(mime)) {
+    return fail(
+      kind === "image"
+        ? "Send a JPEG, PNG, WebP, GIF or HEIC image."
+        : "Send a PDF, text, CSV or Word document.",
+    );
+  }
+
+  try {
+    const sdkModule = await loadSdk();
+
+    const finish = (
+      result: { code: number; msg: string; data?: unknown },
+      fallbackType: string,
+    ): NexconnResult<NexconnChatMessage> => {
+      if (result.code !== 0 || !result.data) {
+        return fail(result.msg || "Nexconn could not send that attachment.", result.code);
+      }
+      const raw = result.data as RawMessage;
+      remember(raw);
+      // The send result is not guaranteed to echo messageType, so fall back to
+      // the type we just uploaded.
+      return { ok: true, data: toChatMessage(raw, fallbackType) };
+    };
+
+    if (kind === "image") {
+      const prepared = await sdkModule.Helper.createSendImageMessageParams(file);
+      if (prepared.code !== 0 || !prepared.data) {
+        return fail(prepared.msg || "Aegis could not prepare that image.", prepared.code);
+      }
+      const params = prepared.data;
+      if (options.needReceipt) params.needReceipt = true;
+      if (options.metadata) params.metadata = { ...options.metadata };
+      return finish(await channel.sendMediaMessage(params), IMAGE_MESSAGE_TYPE);
+    }
+
+    const prepared = await sdkModule.Helper.createSendFileMessageParams(file);
+    if (prepared.code !== 0 || !prepared.data) {
+      return fail(prepared.msg || "Aegis could not prepare that file.", prepared.code);
+    }
+    const params = prepared.data;
+    if (options.needReceipt) params.needReceipt = true;
+    if (options.metadata) params.metadata = { ...options.metadata };
+    return finish(await channel.sendMediaMessage(params), FILE_MESSAGE_TYPE);
+  } catch {
+    return fail("Aegis could not upload that attachment. Check the connection and try again.");
+  }
+}
+
+/** Upload and send an image (thumbnail is generated by the SDK helper). */
+export async function sendImage(
+  channel: NexconnChannel,
+  file: File,
+  options: SendOptions = {},
+): Promise<NexconnResult<NexconnChatMessage>> {
+  return sendMediaUpload(channel, file, "image", options);
+}
+
+/** Upload and send a document as a file message. */
+export async function sendFile(
+  channel: NexconnChannel,
+  file: File,
+  options: SendOptions = {},
+): Promise<NexconnResult<NexconnChatMessage>> {
+  return sendMediaUpload(channel, file, "file", options);
+}
+
 async function loadPage(channel: NexconnChannel, limit: number): Promise<NexconnResult<NexconnChatMessage[]>> {
   try {
     const sdkModule = await loadSdk();
@@ -464,7 +616,7 @@ async function loadPage(channel: NexconnChannel, limit: number): Promise<Nexconn
       remember(row);
       return toChatMessage(row);
     });
-    return { ok: true, data: messages.filter((message) => message.text).reverse() };
+    return { ok: true, data: messages.filter((message) => message.text || message.attachment).reverse() };
   } catch {
     return fail("Aegis could not load this conversation from Nexconn.");
   }
