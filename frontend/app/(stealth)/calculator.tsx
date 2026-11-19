@@ -251,6 +251,8 @@ export default function Calculator({ onUnlock }: CalculatorProps) {
     const handleKeyboard = (event: KeyboardEvent) => {
       const key = event.key;
 
+      if (key === "Enter" && event.target instanceof HTMLButtonElement) return;
+
       if (/^\d$/.test(key)) {
         event.preventDefault();
         appendDigit(key);
@@ -306,9 +308,8 @@ export default function Calculator({ onUnlock }: CalculatorProps) {
     <main className="calculator-stage">
       <section className="calculator" aria-label="Calculator">
         <div className="calculator-topbar">
-          <span className="calculator-speaker" aria-hidden="true" />
           <span>Calculator</span>
-          <span className="calculator-signal" aria-hidden="true">•••</span>
+          <span className="calculator-mode">Standard</span>
         </div>
 
         <div className="calculator-display" aria-live="polite">
@@ -330,7 +331,7 @@ export default function Calculator({ onUnlock }: CalculatorProps) {
           ))}
         </div>
 
-        <p className="calculator-footer">Swipe up to see recent calculations</p>
+        <p className="calculator-footer">Basic calculator</p>
       </section>
     </main>
   );
