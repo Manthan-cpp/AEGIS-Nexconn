@@ -13,7 +13,9 @@ from routers.voice import router as voice_router
 from routers.email import router as email_router
 from routers.health import router as health_router
 from routers.direct_messages import router as direct_messages_router
+from routers.nexconn import router as nexconn_router
 from services.email_queue import start_email_queue_worker, stop_email_queue_worker
+from services.nexconn_server import nexconn_configured
 
 load_dotenv()
 
@@ -56,11 +58,16 @@ app.include_router(voice_router)
 app.include_router(email_router)
 app.include_router(health_router)
 app.include_router(direct_messages_router)
+app.include_router(nexconn_router)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "aegis-backend"}
+    return {
+        "status": "ok",
+        "service": "aegis-backend",
+        "nexconn_configured": nexconn_configured(),
+    }
 
 
 # Routers are added phase by phase:
