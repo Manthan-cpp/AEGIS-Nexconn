@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Inbox, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, Inbox, KeyRound, Trash2, Upload } from "lucide-react";
 
 type ResponderFlowProps = {
   onBack: () => void;
@@ -161,7 +161,7 @@ export default function ResponderFlow({ onBack }: ResponderFlowProps) {
           <h2 id="responder-title">Receive the signal.</h2>
           <p>Upload the original Aegis PNG, reveal its message, and save a case for follow-up.</p>
         </div>
-        <div className="responder-beacon" aria-hidden="true"><span /></div>
+        <div className="responder-beacon" aria-hidden="true"><KeyRound size={22} aria-hidden="true" /></div>
       </div>
 
       <div className="responder-grid">
@@ -227,8 +227,7 @@ export default function ResponderFlow({ onBack }: ResponderFlowProps) {
         ) : (
           <div className="case-list">
             {cases.map((item) => (
-              <article className="case-row" key={item.case_id}>
-                <span className={`severity-dot severity-dot-${item.severity}`} aria-label={`${item.severity} urgency`} />
+              <article className={`case-row case-severity-${item.severity}`} key={item.case_id}>
                 <div className="case-row-content"><div className="case-row-topline"><strong>{item.severity} urgency</strong><time dateTime={item.created_at}>{formatTime(item.created_at)}</time></div><p>{item.message}</p><small>{item.filename ?? "Aegis SOS image"}</small></div>
                 <button className="case-remove-button" type="button" onClick={() => void removeCase(item.case_id)} disabled={removingCaseId === item.case_id} aria-label={`Remove ${item.severity} urgency responder case`}>
                   <Trash2 size={12} aria-hidden="true" />

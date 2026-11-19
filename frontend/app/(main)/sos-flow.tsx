@@ -193,7 +193,6 @@ export default function SosFlow({ onBack }: SOSFlowProps) {
                   checked={theme === option.value}
                   onChange={() => setTheme(option.value)}
                 />
-                <span className="theme-option-dot" aria-hidden="true" />
                 <span>
                   <strong>{option.label}</strong>
                   <small>{option.note}</small>
