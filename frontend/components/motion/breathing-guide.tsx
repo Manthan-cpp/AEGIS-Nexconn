@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Wind, Play, Pause, X } from "lucide-react";
+import { Pause, Play, Wind, X } from "lucide-react";
 
 type BreathingPhase = "inhale" | "hold" | "exhale" | "rest";
 
@@ -10,11 +10,11 @@ interface BreathingGuideProps {
   variant?: "floating" | "inline";
 }
 
-const PHASES: { phase: BreathingPhase; label: string; subtext: string; duration: number }[] = [
-  { phase: "inhale", label: "Inhale slowly", subtext: "Draw peaceful air in through your nose", duration: 4 },
-  { phase: "hold", label: "Hold gently", subtext: "Rest comfortably in this still moment", duration: 4 },
-  { phase: "exhale", label: "Exhale softly", subtext: "Release all tension through your mouth", duration: 6 },
-  { phase: "rest", label: "Be still", subtext: "Feel the calm ground beneath you", duration: 2 },
+const PHASES: { phase: BreathingPhase; label: string; shortLabel: string; subtext: string; duration: number }[] = [
+  { phase: "inhale", label: "Inhale slowly", shortLabel: "Inhale", subtext: "Breathe in gently through your nose.", duration: 4 },
+  { phase: "hold", label: "Hold gently", shortLabel: "Hold", subtext: "Pause without straining.", duration: 4 },
+  { phase: "exhale", label: "Exhale softly", shortLabel: "Exhale", subtext: "Release the breath through your mouth.", duration: 6 },
+  { phase: "rest", label: "Be still", shortLabel: "Rest", subtext: "Let your shoulders relax before the next breath.", duration: 2 },
 ];
 
 export function BreathingGuide({ onClose, variant = "inline" }: BreathingGuideProps) {
@@ -29,62 +29,50 @@ export function BreathingGuide({ onClose, variant = "inline" }: BreathingGuidePr
     if (!isActive) return;
 
     const timer = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
+      setSecondsLeft((previous) => {
+        if (previous <= 1) {
           const nextIndex = (phaseIndex + 1) % PHASES.length;
           setPhaseIndex(nextIndex);
-          if (nextIndex === 0) {
-            setCyclesCompleted((c) => c + 1);
-          }
+          if (nextIndex === 0) setCyclesCompleted((count) => count + 1);
           return PHASES[nextIndex].duration;
         }
-        return prev - 1;
+        return previous - 1;
       });
     }, 1000);
 
     return () => clearInterval(timer);
   }, [isActive, phaseIndex]);
 
-  const scale =
-    currentPhase.phase === "inhale"
-      ? 1.28
-      : currentPhase.phase === "hold"
-      ? 1.28
-      : currentPhase.phase === "exhale"
+  const scale = currentPhase.phase === "inhale" || currentPhase.phase === "hold"
+    ? 1.22
+    : currentPhase.phase === "exhale"
       ? 0.88
-      : 0.95;
-
-  const durationStyle = `${currentPhase.duration}s`;
+      : 0.96;
 
   return (
-    <div className={`breathing-guide-card breathing-guide-${variant}`} role="region" aria-label="Interactive breathing sanctuary">
+    <div
+      className={`breathing-guide-card breathing-guide-${variant}`}
+      role={variant === "inline" && onClose ? "dialog" : "region"}
+      aria-modal={variant === "inline" && onClose ? true : undefined}
+      aria-labelledby="breathing-guide-title"
+    >
       <div className="breathing-guide-header">
         <div className="breathing-guide-title-row">
-          <span className="breathing-leaf-icon" aria-hidden="true">
-            <Wind size={20} />
-          </span>
+          <span className="breathing-leaf-icon" aria-hidden="true"><Wind size={19} /></span>
           <div>
-            <h3 className="breathing-guide-heading">Calm Breathing Sanctuary</h3>
-            <p className="breathing-guide-subheading">4-4-6 grounding rhythm · cycle {cyclesCompleted + 1}</p>
+            <h3 className="breathing-guide-heading" id="breathing-guide-title">Breathing guide</h3>
+            <p className="breathing-guide-subheading">4–4–6–2 rhythm · Cycle {cyclesCompleted + 1}</p>
           </div>
         </div>
         <div className="breathing-controls">
           <button
             type="button"
             className="breathing-toggle-btn"
-            onClick={() => setIsActive(!isActive)}
+            onClick={() => setIsActive((active) => !active)}
             aria-label={isActive ? "Pause breathing exercise" : "Resume breathing exercise"}
-            style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}
           >
-            {isActive ? (
-              <>
-                <Pause size={12} /> Pause
-              </>
-            ) : (
-              <>
-                <Play size={12} /> Resume
-              </>
-            )}
+            {isActive ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+            {isActive ? "Pause" : "Resume"}
           </button>
           {onClose && (
             <button
@@ -92,54 +80,41 @@ export function BreathingGuide({ onClose, variant = "inline" }: BreathingGuidePr
               className="breathing-close-btn"
               onClick={onClose}
               aria-label="Close breathing guide"
+              autoFocus={variant === "inline"}
             >
-              <X size={14} />
+              <X size={16} aria-hidden="true" />
             </button>
           )}
         </div>
       </div>
 
-      <div className="breathing-circle-stage">
-        {/* Ambient breathing rings */}
+      <div className="breathing-circle-stage" aria-hidden="true">
         <div
-          className={`breathing-ring breathing-ring-outer phase-${currentPhase.phase}`}
+          className={`breathing-circle-core phase-${currentPhase.phase}${isActive ? " is-active" : ""}`}
           style={{
-            transform: `scale(${scale * 1.15})`,
-            transition: `transform ${durationStyle} cubic-bezier(0.4, 0, 0.2, 1), opacity ${durationStyle} ease`,
-          }}
-        />
-        <div
-          className={`breathing-ring breathing-ring-middle phase-${currentPhase.phase}`}
-          style={{
-            transform: `scale(${scale * 1.05})`,
-            transition: `transform ${durationStyle} cubic-bezier(0.4, 0, 0.2, 1)`,
-          }}
-        />
-        <div
-          className={`breathing-circle-core phase-${currentPhase.phase}`}
-          style={{
-            transform: `scale(${scale})`,
-            transition: `transform ${durationStyle} cubic-bezier(0.4, 0, 0.2, 1)`,
+            transform: `scale(${isActive ? scale : 1})`,
+            transitionDuration: isActive ? `${currentPhase.duration}s` : "160ms",
           }}
         >
-          <span className="breathing-countdown">{secondsLeft}s</span>
+          <span className="breathing-countdown">{secondsLeft}</span>
+          <span className="breathing-countdown-unit">seconds</span>
         </div>
       </div>
 
-      <div className="breathing-prompt-box">
-        <p className="breathing-phase-instruction">{currentPhase.label}</p>
-        <p className="breathing-phase-detail">{currentPhase.subtext}</p>
+      <div className="breathing-prompt-box" aria-live="polite" aria-atomic="true">
+        <p className="breathing-phase-instruction">{isActive ? currentPhase.label : "Paused"}</p>
+        <p className="breathing-phase-detail">{isActive ? currentPhase.subtext : "Resume whenever you feel ready."}</p>
       </div>
 
-      <div className="breathing-step-indicators" aria-hidden="true">
-        {PHASES.map((p, idx) => (
-          <div
-            key={p.phase}
-            className={`breathing-step-pill ${idx === phaseIndex ? "is-active" : ""}`}
-            title={p.label}
-          />
+      <ol className="breathing-step-indicators" aria-label="Breathing phases">
+        {PHASES.map((phase, index) => (
+          <li className={index === phaseIndex ? "is-active" : ""} key={phase.phase} aria-current={index === phaseIndex ? "step" : undefined}>
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <strong>{phase.shortLabel}</strong>
+            <small>{phase.duration}s</small>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }
