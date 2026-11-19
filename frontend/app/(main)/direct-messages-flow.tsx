@@ -1,16 +1,42 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Clock, MessageSquare, RefreshCw, Search, Send, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, CheckCheck, Clock, MessageSquare, RefreshCw, Search, Send, Trash2 } from "lucide-react";
 import { SignInButton, SignUpButton, useAuth, useUser } from "@clerk/nextjs";
+import {
+  type NexconnChannel,
+  type NexconnChatMessage,
+  channelIdsOf,
+  connect,
+  deleteMessages,
+  fetchLatestMessage,
+  fetchRecentMessages,
+  getOrCreateDirectChannel,
+  markMessagesRead,
+  sendText,
+  sendTyping,
+  setSessionTokenProvider,
+  subscribe,
+  subscribeToDeletions,
+  subscribeToPresence,
+  subscribeToReceipts,
+  subscribeToTyping,
+} from "./nexconn-client";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8123";
 const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+
+// Nexconn pushes messages, so the history poll is a slow safety net rather than
+// the delivery path it used to be.
+const POLL_INTERVAL_MS = 8_000;
+const EXPIRY_TICK_MS = 5_000;
+const TYPING_THROTTLE_MS = 5_000;
 
 type Profile = {
   user_id: string;
   username: string;
   display_name: string;
+  nexconn_user_id?: string;
 };
 
 type Conversation = {
@@ -28,6 +54,12 @@ type ConversationSettings = {
   conversation_id: string;
   disappearing_enabled: boolean;
   disappearing_seconds: number;
+};
+
+type Preview = {
+  text: string;
+  sentAt: number;
+  fromMe: boolean;
 };
 
 const DISAPPEARING_OPTIONS = [
@@ -50,7 +82,35 @@ type Message = {
   created_at: string;
   expires_at: string | null;
   is_from_me: boolean;
+  read?: boolean;
 };
+
+function toUiMessage(message: NexconnChatMessage): Message {
+  const expiry = message.metadata["aegis_expires_at"];
+  const parsed = expiry ? Date.parse(expiry) : Number.NaN;
+  return {
+    message_id: message.id,
+    sender_id: message.senderId,
+    content: message.text,
+    created_at: new Date(message.sentAt).toISOString(),
+    expires_at: Number.isNaN(parsed) ? null : new Date(parsed).toISOString(),
+    is_from_me: message.isFromMe,
+    read: false,
+  };
+}
+
+function mergeMessages(current: Message[], incoming: Message[]): Message[] {
+  if (!incoming.length) return current;
+  const byId = new Map(current.map((message) => [message.message_id, message]));
+  for (const message of incoming) {
+    const existing = byId.get(message.message_id);
+    byId.set(
+      message.message_id,
+      existing ? { ...existing, ...message, read: Boolean(existing.read || message.read) } : message,
+    );
+  }
+  return [...byId.values()].sort((first, second) => Date.parse(first.created_at) - Date.parse(second.created_at));
+}
 
 function GuestMessagesFlow({ onBack }: { onBack: () => void }) {
   return (
@@ -108,7 +168,14 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
-  const pendingMessageRef = useRef<{ content: string; clientMessageId: string } | null>(null);
+  const [connection, setConnection] = useState<"connecting" | "ready" | "unavailable">("connecting");
+  const [presence, setPresence] = useState<Record<string, boolean>>({});
+  const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
+  const [previews, setPreviews] = useState<Record<string, Preview>>({});
+
+  const channelRef = useRef<{ channel: NexconnChannel; peerId: string } | null>(null);
+  const recalledRef = useRef<Set<string>>(new Set());
+  const lastTypingSentRef = useRef(0);
 
   const displayName = useMemo(
     () => user?.fullName || user?.username || "Aegis user",
@@ -137,8 +204,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       response = await send(token);
     } catch {
       // GET requests are safe to retry after a short-lived server restart or
-      // network hiccup. Do not blindly retry POST requests because the server
-      // may have accepted the write before the browser lost the response.
+      // network hiccup. Do not blindly retry requests that may have written.
       if (method !== "GET") throw new Error(backendUnavailable);
       await new Promise((resolve) => window.setTimeout(resolve, 250));
       try {
@@ -207,105 +273,233 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     return () => { active = false; };
   }, [displayName, isLoaded, isSignedIn, loadConversations, request, user, username]);
 
-  const loadMessages = useCallback(async (conversationId: string) => {
-    const loaded = await request<Message[]>(`/dm/conversations/${conversationId}/messages`);
-    setMessages(loaded);
-  }, [request]);
+  const userId = user?.id ?? "";
+
+  // Nexconn owns the transport, so the SDK connection is opened once per
+  // signed-in account and reused for every conversation.
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !userId) return;
+    let active = true;
+    setSessionTokenProvider((options) => getToken(options));
+    setConnection("connecting");
+    void connect().then((result) => {
+      if (!active) return;
+      if (result.ok) {
+        setConnection("ready");
+        return;
+      }
+      setConnection("unavailable");
+      setError(result.error);
+    });
+    return () => { active = false; };
+  }, [getToken, isLoaded, isSignedIn, userId]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (connection !== "ready") return;
+    return subscribeToTyping((channelId, isTyping) => {
+      setTypingChannelId((current) => (isTyping ? channelId : current === channelId ? null : current));
+    });
+  }, [connection]);
+
+  useEffect(() => {
+    if (connection !== "ready") return;
+    return subscribeToDeletions((_channelId, messageIds) => {
+      const removed = new Set(messageIds);
+      setMessages((current) => {
+        if (!current.some((message) => removed.has(message.message_id))) return current;
+        return current.filter((message) => !removed.has(message.message_id));
+      });
+      setSelectedMessageIds((current) => current.filter((messageId) => !removed.has(messageId)));
+    });
+  }, [connection]);
+
+  useEffect(() => {
+    if (connection !== "ready") return;
+    return subscribeToReceipts((_channelId, messageIds) => {
+      const read = new Set(messageIds);
+      setMessages((current) => {
+        if (!current.some((message) => read.has(message.message_id) && !message.read)) return current;
+        return current.map((message) => (read.has(message.message_id) ? { ...message, read: true } : message));
+      });
+    });
+  }, [connection]);
+
+  const activeConversationId = selected?.conversation_id ?? "";
+  const activePeerId = selected?.recipient.nexconn_user_id ?? "";
+
+  useEffect(() => {
+    if (connection !== "ready" || !activeConversationId || !activePeerId) return;
     let active = true;
-    let socket: WebSocket | null = null;
-    let fallbackTimer: number | null = null;
-    const refresh = async () => {
-      try {
-        const loaded = await request<Message[]>(`/dm/conversations/${selected.conversation_id}/messages`);
-        if (active) setMessages(loaded);
-      } catch (requestError: unknown) {
-        if (active) setError(requestError instanceof Error ? requestError.message : "Aegis could not refresh this conversation.");
+    let channel: NexconnChannel | null = null;
+    let unsubscribeMessages: Array<() => void> = [];
+    let pollTimer: number | null = null;
+    const readConfirmed = new Set<string>();
+
+    setMessages([]);
+    setNotice("");
+    setError("");
+
+    const confirmRead = (incoming: NexconnChatMessage[]) => {
+      if (!channel) return;
+      const fresh = incoming.filter((message) => !message.isFromMe && !readConfirmed.has(message.id));
+      if (!fresh.length) return;
+      for (const message of fresh) readConfirmed.add(message.id);
+      void markMessagesRead(channel, fresh.map((message) => message.id));
+    };
+
+    const start = async () => {
+      const channelResult = await getOrCreateDirectChannel(activePeerId);
+      if (!active) return;
+      if (!channelResult.ok) {
+        setError(channelResult.error);
+        return;
       }
-    };
-    void refresh();
-    const startFallbackPolling = () => {
-      if (fallbackTimer === null) fallbackTimer = window.setInterval(() => { void refresh(); }, 4_000);
-    };
-    const connectRealtime = async () => {
-      try {
-        const token = await getToken({ skipCache: true });
-        if (!token || !active) {
-          startFallbackPolling();
-          return;
+      channel = channelResult.data;
+      channelRef.current = { channel, peerId: activePeerId };
+
+      const handleMessage = (message: NexconnChatMessage) => {
+        if (!active) return;
+        setMessages((current) => mergeMessages(current, [toUiMessage(message)]));
+        setPreviews((current) => ({
+          ...current,
+          [activeConversationId]: { text: message.text, sentAt: message.sentAt, fromMe: message.isFromMe },
+        }));
+        if (!message.isFromMe) {
+          confirmRead([message]);
+          setTypingChannelId(null);
         }
-        const socketBase = API_BASE_URL.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-        socket = new WebSocket(`${socketBase}/dm/conversations/${selected.conversation_id}/stream`);
-        socket.onopen = () => {
-          socket?.send(JSON.stringify({ token }));
-          if (fallbackTimer !== null) {
-            window.clearInterval(fallbackTimer);
-            fallbackTimer = null;
-          }
-        };
-        socket.onmessage = (event) => {
-          try {
-            const payload = JSON.parse(event.data) as {
-              type?: string;
-              message?: Message;
-              settings?: ConversationSettings;
-              deleted_message_ids?: string[];
-            };
-            if (payload.type === "message" && payload.message) {
-              setMessages((current) => current.some((message) => message.message_id === payload.message?.message_id)
-                ? current
-                : [...current, payload.message as Message]);
-              void loadConversations();
-              return;
-            }
-            if (payload.type === "settings" && payload.settings) {
-              const settings = payload.settings;
-              setSelected((current) => current?.conversation_id === settings.conversation_id
-                ? { ...current, ...settings }
-                : current);
-              setConversations((current) => current.map((conversation) => conversation.conversation_id === settings.conversation_id
-                ? { ...conversation, ...settings }
-                : conversation));
-              return;
-            }
-            if (payload.type === "messages_deleted" && payload.deleted_message_ids) {
-              const deletedIds = new Set(payload.deleted_message_ids);
-              setMessages((current) => current.filter((message) => !deletedIds.has(message.message_id)));
-              setSelectedMessageIds((current) => current.filter((messageId) => !deletedIds.has(messageId)));
-              void loadConversations();
-            }
-          } catch {
-            // Keep the conversation usable if a malformed event is received.
-          }
-        };
-        socket.onerror = () => startFallbackPolling();
-        socket.onclose = () => {
-          if (active) startFallbackPolling();
-        };
-      } catch {
-        startFallbackPolling();
+      };
+      unsubscribeMessages = channelIdsOf(channel).map((channelId) => subscribe(channelId, handleMessage));
+
+      const history = await fetchRecentMessages(channel, 80);
+      if (!active) return;
+      if (history.ok) {
+        setMessages(history.data.map(toUiMessage));
+        confirmRead(history.data);
+        const latest = history.data[history.data.length - 1];
+        if (latest) {
+          setPreviews((current) => ({
+            ...current,
+            [activeConversationId]: { text: latest.text, sentAt: latest.sentAt, fromMe: latest.isFromMe },
+          }));
+        }
+      } else {
+        setError(history.error);
       }
+
+      pollTimer = window.setInterval(async () => {
+        if (!active || !channel || document.hidden) return;
+        const latest = await fetchRecentMessages(channel, 80);
+        if (!active || !latest.ok) return;
+        setMessages((current) => mergeMessages(current, latest.data.map(toUiMessage)));
+        confirmRead(latest.data);
+      }, POLL_INTERVAL_MS);
     };
-    void connectRealtime();
+
+    void start();
+
     return () => {
       active = false;
-      if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
-      socket?.close();
+      for (const unsubscribe of unsubscribeMessages) unsubscribe();
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      if (channelRef.current?.channel === channel) channelRef.current = null;
+      setTypingChannelId(null);
     };
-  }, [getToken, loadConversations, loadMessages, request, selected]);
+  }, [activeConversationId, activePeerId, connection]);
 
+  const ensureChannel = useCallback(async (peerId: string) => {
+    const current = channelRef.current;
+    if (current?.peerId === peerId) return { ok: true as const, data: current.channel };
+    const result = await getOrCreateDirectChannel(peerId);
+    if (result.ok) channelRef.current = { channel: result.data, peerId };
+    return result;
+  }, []);
+
+  useEffect(() => {
+    if (connection !== "ready") return;
+    const peerIds = conversations
+      .map((conversation) => conversation.recipient.nexconn_user_id)
+      .filter((value): value is string => Boolean(value));
+    if (activePeerId && !peerIds.includes(activePeerId)) peerIds.push(activePeerId);
+    if (!peerIds.length) return;
+
+    let active = true;
+    let unsubscribe: (() => void) | null = null;
+    void subscribeToPresence(peerIds, (snapshot) => {
+      if (!active) return;
+      setPresence((current) => {
+        const next = { ...current, ...snapshot };
+        const changed = Object.keys(next).some((key) => next[key] !== current[key]);
+        return changed ? next : current;
+      });
+    }).then((cleanup) => {
+      if (active) unsubscribe = cleanup;
+      else cleanup();
+    });
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [activePeerId, connection, conversations]);
+
+  // Conversation previews now come from Nexconn history because AEGIS no
+  // longer stores message content in its own database.
+  useEffect(() => {
+    if (connection !== "ready" || conversations.length === 0) return;
+    let active = true;
+    void Promise.all(
+      conversations.slice(0, 20).map(async (conversation) => {
+        const peerId = conversation.recipient.nexconn_user_id;
+        if (!peerId) return;
+        const channelResult = await getOrCreateDirectChannel(peerId);
+        if (!channelResult.ok) return;
+        const latest = await fetchLatestMessage(channelResult.data);
+        if (!active || !latest.ok || !latest.data) return;
+        const message = latest.data;
+        setPreviews((current) => {
+          const existing = current[conversation.conversation_id];
+          if (existing && existing.sentAt >= message.sentAt) return current;
+          return {
+            ...current,
+            [conversation.conversation_id]: { text: message.text, sentAt: message.sentAt, fromMe: message.isFromMe },
+          };
+        });
+      }),
+    );
+    return () => { active = false; };
+  }, [conversations, connection]);
+
+  // Disappearing messages: Nexconn has no native TTL, so a message carries its
+  // own expiry in metadata and the sender's client recalls it once it lapses.
   useEffect(() => {
     const cleanupTimer = window.setInterval(() => {
       const now = Date.now();
       setMessages((current) => {
-        const next = current.filter((message) => !message.expires_at || Date.parse(message.expires_at) > now);
-        return next.length === current.length ? current : next;
+        const expired = current.filter((message) => message.expires_at && Date.parse(message.expires_at) <= now);
+        if (!expired.length) return current;
+        const channel = channelRef.current?.channel;
+        const recallable = expired
+          .filter((message) => message.is_from_me && !recalledRef.current.has(message.message_id))
+          .map((message) => message.message_id);
+        if (channel && recallable.length) {
+          for (const messageId of recallable) recalledRef.current.add(messageId);
+          void deleteMessages(channel, recallable);
+        }
+        return current.filter((message) => !(message.expires_at && Date.parse(message.expires_at) <= now));
       });
-    }, 15_000);
+    }, EXPIRY_TICK_MS);
     return () => window.clearInterval(cleanupTimer);
   }, []);
+
+  const orderedConversations = useMemo(() => {
+    const timestamp = (conversation: Conversation) =>
+      previews[conversation.conversation_id]?.sentAt ?? (Date.parse(conversation.updated_at) || 0);
+    return [...conversations].sort((first, second) => timestamp(second) - timestamp(first));
+  }, [conversations, previews]);
+
+  const typingChannelIds = channelRef.current ? channelIdsOf(channelRef.current.channel) : [];
+  const isPeerTyping = Boolean(typingChannelId && typingChannelIds.includes(typingChannelId));
 
   if (!isLoaded) {
     return <section className="dm-flow"><p className="dm-muted">Loading account…</p></section>;
@@ -342,7 +536,6 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
       setResults([]);
       setSearch("");
       await loadConversations();
-      await loadMessages(conversation.conversation_id);
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : "Aegis could not start that conversation.");
     }
@@ -357,31 +550,55 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     setSelectedMessageIds([]);
   }
 
+  function handleDraftChange(value: string) {
+    setDraft(value);
+    const active = channelRef.current;
+    if (!active || !value.trim()) return;
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < TYPING_THROTTLE_MS) return;
+    lastTypingSentRef.current = now;
+    void sendTyping(active.channel);
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected || !draft.trim()) return;
+    if (!selected || !draft.trim() || isSending) return;
+    const peerId = selected.recipient.nexconn_user_id;
+    if (!peerId) {
+      setError("This contact cannot receive Nexconn messages yet. Ask them to sign in once more.");
+      return;
+    }
+
     setIsSending(true);
     setError("");
+    setNotice("");
     const content = draft.trim();
-    const pending = pendingMessageRef.current;
-    const clientMessageId = pending?.content === content
-      ? pending.clientMessageId
-      : (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    pendingMessageRef.current = { content, clientMessageId };
     try {
-      const sent = await request<Message>(`/dm/conversations/${selected.conversation_id}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ content, client_message_id: clientMessageId }),
-      });
-      pendingMessageRef.current = null;
+      const channelResult = await ensureChannel(peerId);
+      if (!channelResult.ok) {
+        setError(channelResult.error);
+        return;
+      }
+
+      const metadata: Record<string, string> = { aegis_conversation_id: selected.conversation_id };
+      if (selected.disappearing_enabled) {
+        const seconds = Math.max(10, Number(selected.disappearing_seconds) || 21600);
+        metadata.aegis_expires_at = new Date(Date.now() + seconds * 1000).toISOString();
+      }
+
+      const sent = await sendText(channelResult.data, content, { needReceipt: true, metadata });
+      if (!sent.ok) {
+        setError(sent.error);
+        return;
+      }
+
       setDraft("");
       setNotice("Message sent.");
-      setMessages((current) => current.some((message) => message.message_id === sent.message_id)
-        ? current
-        : [...current, sent]);
-      void loadConversations();
-    } catch (requestError: unknown) {
-      setError(requestError instanceof Error ? requestError.message : "Aegis could not send that message.");
+      setMessages((current) => mergeMessages(current, [toUiMessage(sent.data)]));
+      setPreviews((current) => ({
+        ...current,
+        [selected.conversation_id]: { text: sent.data.text, sentAt: sent.data.sentAt, fromMe: true },
+      }));
     } finally {
       setIsSending(false);
     }
@@ -428,23 +645,32 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
 
   async function deleteSelectedMessages() {
     if (!selected || selectedMessageIds.length === 0) return;
+    const peerId = selected.recipient.nexconn_user_id;
+    if (!peerId) {
+      setError("This contact cannot receive Nexconn messages yet. Ask them to sign in once more.");
+      return;
+    }
+
     setIsDeleting(true);
     setError("");
     try {
-      const deleted = await request<{ deleted_message_ids: string[] }>(`/dm/conversations/${selected.conversation_id}/messages`, {
-        method: "DELETE",
-        body: JSON.stringify({ message_ids: selectedMessageIds }),
-      });
-      const deletedIds = new Set(deleted.deleted_message_ids);
+      const channelResult = await ensureChannel(peerId);
+      if (!channelResult.ok) {
+        setError(channelResult.error);
+        return;
+      }
+      const deleted = await deleteMessages(channelResult.data, selectedMessageIds);
+      if (!deleted.ok) {
+        setError(deleted.error);
+        return;
+      }
+      const deletedIds = new Set(deleted.data);
       setMessages((current) => current.filter((message) => !deletedIds.has(message.message_id)));
       setSelectedMessageIds([]);
       setSelectionMode(false);
-      setNotice(deleted.deleted_message_ids.length === 1
+      setNotice(deleted.data.length === 1
         ? "Message deleted."
-        : `${deleted.deleted_message_ids.length} messages deleted.`);
-      void loadConversations();
-    } catch (requestError: unknown) {
-      setError(requestError instanceof Error ? requestError.message : "Aegis could not delete those messages.");
+        : `${deleted.data.length} messages deleted.`);
     } finally {
       setIsDeleting(false);
     }
@@ -480,7 +706,13 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
             <div className="dm-search-results">
               {results.map((profile) => (
                 <button className="dm-profile-result" type="button" key={profile.user_id} onClick={() => void openConversation(profile)}>
-                  <span className="dm-profile-avatar" aria-hidden="true">{profile.username.slice(0, 1).toUpperCase()}</span>
+                  <span className="dm-avatar-wrap">
+                    <span className="dm-profile-avatar" aria-hidden="true">{profile.username.slice(0, 1).toUpperCase()}</span>
+                    <span
+                      className={`dm-presence ${profile.nexconn_user_id && presence[profile.nexconn_user_id] ? "is-online" : ""}`}
+                      aria-hidden="true"
+                    />
+                  </span>
                   <span><strong>{profile.display_name}</strong><small>@{profile.username}</small></span>
                 </button>
               ))}
@@ -495,7 +727,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
           {isLoading && <p className="dm-muted">Loading…</p>}
           {!isLoading && conversations.length === 0 && <p className="dm-muted">No private conversations yet.</p>}
           <div className="dm-conversation-list">
-            {conversations.map((conversation) => (
+            {orderedConversations.map((conversation) => (
               <button
                 className={`dm-conversation-item ${selected?.conversation_id === conversation.conversation_id ? "is-selected" : ""}`}
                 type="button"
@@ -503,8 +735,22 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                 aria-pressed={selected?.conversation_id === conversation.conversation_id}
                 onClick={() => selectConversation(conversation)}
               >
-                <span className="dm-profile-avatar" aria-hidden="true">{conversation.recipient.username.slice(0, 1).toUpperCase()}</span>
-                <span><strong>{conversation.recipient.display_name}</strong><small>@{conversation.recipient.username}</small><em>{conversation.last_message || "Conversation started"}</em></span>
+                <span className="dm-avatar-wrap">
+                  <span className="dm-profile-avatar" aria-hidden="true">{conversation.recipient.username.slice(0, 1).toUpperCase()}</span>
+                  <span
+                    className={`dm-presence ${conversation.recipient.nexconn_user_id && presence[conversation.recipient.nexconn_user_id] ? "is-online" : ""}`}
+                    aria-hidden="true"
+                  />
+                </span>
+                <span>
+                  <strong>{conversation.recipient.display_name}</strong>
+                  <small>@{conversation.recipient.username}</small>
+                  <em>
+                    {previews[conversation.conversation_id]
+                      ? `${previews[conversation.conversation_id].fromMe ? "You: " : ""}${previews[conversation.conversation_id].text}`
+                      : (conversation.last_message || "Conversation started")}
+                  </em>
+                </span>
               </button>
             ))}
           </div>
@@ -514,8 +760,20 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
           {selected ? (
             <>
               <div className="dm-conversation-heading">
-                <span className="dm-profile-avatar" aria-hidden="true">{selected.recipient.username.slice(0, 1).toUpperCase()}</span>
-                <div><strong>{selected.recipient.display_name}</strong><small>@{selected.recipient.username}</small></div>
+                <span className="dm-avatar-wrap">
+                  <span className="dm-profile-avatar" aria-hidden="true">{selected.recipient.username.slice(0, 1).toUpperCase()}</span>
+                  <span
+                    className={`dm-presence ${selected.recipient.nexconn_user_id && presence[selected.recipient.nexconn_user_id] ? "is-online" : ""}`}
+                    aria-hidden="true"
+                  />
+                </span>
+                <div>
+                  <strong>{selected.recipient.display_name}</strong>
+                  <small>
+                    @{selected.recipient.username}
+                    {selected.recipient.nexconn_user_id && presence[selected.recipient.nexconn_user_id] ? " · Online" : ""}
+                  </small>
+                </div>
                 <div className="dm-conversation-tools">
                   <button className={`dm-tool-button ${selected.disappearing_enabled ? "is-active" : ""}`} type="button" onClick={() => setIsSettingsOpen((current) => !current)}>
                     <Clock size={12} aria-hidden="true" />
@@ -563,7 +821,11 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                 </div>
               )}
               <div className="dm-messages" aria-live="polite">
-                {messages.length === 0 && <p className="dm-empty-conversation">This is the beginning of a private conversation.</p>}
+                {messages.length === 0 && (
+                  <p className="dm-empty-conversation">
+                    {connection === "ready" ? "This is the beginning of a private conversation." : "Connecting to secure messaging…"}
+                  </p>
+                )}
                 {messages.map((message) => (
                   <div
                     className={`dm-message ${message.is_from_me ? "is-mine" : "is-theirs"} ${selectionMode ? "is-selectable" : ""} ${selectedMessageIds.includes(message.message_id) ? "is-selected" : ""}`}
@@ -580,14 +842,36 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                     } : undefined}
                   >
                     <p>{message.content}</p>
-                    <time dateTime={message.created_at}>{message.is_from_me ? "You" : selected.recipient.display_name}</time>
+                    <div className="dm-message-meta">
+                      <time dateTime={message.created_at}>{message.is_from_me ? "You" : selected.recipient.display_name}</time>
+                      {message.is_from_me && (
+                        <span
+                          className={`dm-receipt ${message.read ? "is-read" : ""}`}
+                          aria-label={message.read ? "Read" : "Sent"}
+                          title={message.read ? "Read" : "Sent"}
+                        >
+                          {message.read ? <CheckCheck size={12} aria-hidden="true" /> : <Check size={12} aria-hidden="true" />}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
+              <p className={`dm-typing ${isPeerTyping ? "is-visible" : ""}`} aria-live="polite">
+                {isPeerTyping ? `${selected.recipient.display_name} is typing…` : ""}
+              </p>
               <form className="dm-composer" onSubmit={sendMessage}>
                 <label className="sr-only" htmlFor="dm-message">Write a private message</label>
-                <textarea id="dm-message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Write a private message…" maxLength={2_000} rows={3} />
-                <button className="dm-primary-button" type="submit" disabled={isSending || !draft.trim()}>
+                <textarea
+                  id="dm-message"
+                  value={draft}
+                  onChange={(event) => handleDraftChange(event.target.value)}
+                  placeholder={connection === "ready" ? "Write a private message…" : "Connecting to secure messaging…"}
+                  maxLength={2_000}
+                  rows={3}
+                  disabled={connection !== "ready"}
+                />
+                <button className="dm-primary-button" type="submit" disabled={isSending || !draft.trim() || connection !== "ready"}>
                   {isSending ? "Sending…" : "Send message"}
                   <Send size={13} aria-hidden="true" />
                 </button>
