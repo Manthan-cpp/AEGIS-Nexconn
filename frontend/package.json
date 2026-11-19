@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^7.7.9",
+    "@nexconn/chat": "^26.5.1",
+    "@nexconn/engine": "^26.5.1",
     "@omnidim-ai/client": "^0.1.0",
     "lucide-react": "^1.52.0",
     "next": "16.3.0",
