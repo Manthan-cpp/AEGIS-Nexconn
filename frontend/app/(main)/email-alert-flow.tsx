@@ -259,7 +259,7 @@ export default function EmailAlertFlow({ onBack }: EmailAlertFlowProps) {
       <form className="email-alert-panel" onSubmit={sendEmail}>
         <div className="email-alert-panel-topbar">
           <div>
-            <div className="companion-status"><span className="companion-status-dot" aria-hidden="true" /> Email help request</div>
+            <div className="companion-status"><Mail size={14} aria-hidden="true" /> Email help request</div>
             <p>Choose the recipient before you prepare the message.</p>
           </div>
           <div className="email-alert-topbar-badges">
@@ -271,6 +271,7 @@ export default function EmailAlertFlow({ onBack }: EmailAlertFlowProps) {
           <button
             className={recipientType === "trusted" ? "is-selected" : ""}
             type="button"
+            aria-pressed={recipientType === "trusted"}
             onClick={() => { setRecipientType("trusted"); setNotice(null); setError(null); }}
             disabled={isSending}
           >
@@ -280,6 +281,7 @@ export default function EmailAlertFlow({ onBack }: EmailAlertFlowProps) {
           <button
             className={recipientType === "women_support" ? "is-selected" : ""}
             type="button"
+            aria-pressed={recipientType === "women_support"}
             onClick={() => { setRecipientType("women_support"); setNotice(null); setError(null); }}
             disabled={isSending}
           >

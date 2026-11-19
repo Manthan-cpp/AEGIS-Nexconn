@@ -123,7 +123,7 @@ export default function TrustedCallerFlow({ onBack }: TrustedCallerFlowProps) {
       <form className="trusted-caller-panel" onSubmit={startCall}>
         <div className="trusted-caller-panel-topbar">
           <div className="companion-status">
-            <span className={`companion-status-dot${isLive ? " is-live" : ""}`} aria-hidden="true" />
+            <PhoneCall size={14} aria-hidden="true" />
             {statusText(status)}
           </div>
           {isLive && (
