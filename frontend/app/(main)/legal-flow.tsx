@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useState, type ReactNode } from "react";
-import { ArrowLeft, Scale, Send, ExternalLink, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Scale, Send, ExternalLink, ShieldCheck, LoaderCircle } from "lucide-react";
 
 type LegalFlowProps = {
   onBack: () => void;
@@ -184,7 +184,8 @@ export default function LegalFlow({ onBack }: LegalFlowProps) {
   return (
     <section className="legal-flow" aria-labelledby="legal-title">
       <button className="back-link" type="button" onClick={onBack}>
-        <span aria-hidden="true"><ArrowLeft size={14} /></span> Back to toolkit
+        <ArrowLeft size={15} aria-hidden="true" />
+        <span>Back to toolkit</span>
       </button>
 
       <div className="legal-heading">
@@ -198,13 +199,13 @@ export default function LegalFlow({ onBack }: LegalFlowProps) {
 
       <section className="legal-chat-panel" aria-label="Conversation with Aegis Legal">
         <div className="legal-chat-topbar">
-          <div className="companion-status"><span className="companion-status-dot" aria-hidden="true" />Source-grounded conversation</div>
+          <div className="companion-status"><ShieldCheck size={14} aria-hidden="true" />Source-grounded conversation</div>
           <span className="legal-chat-scope" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
             <ShieldCheck size={12} /> India only
           </span>
         </div>
 
-        <div className="legal-chat-messages" data-lenis-prevent aria-live="polite">
+        <div className="legal-chat-messages" aria-live="polite">
           {messages.map((message) => (
             <div className={`chat-row chat-row-${message.role}`} key={message.id}>
               {message.role === "assistant" && <span className="chat-avatar legal-chat-avatar" aria-hidden="true"><Scale size={14} /></span>}
@@ -237,7 +238,7 @@ export default function LegalFlow({ onBack }: LegalFlowProps) {
           {isAsking && (
             <div className="chat-row chat-row-assistant" aria-label="Aegis Legal is searching official sources">
               <span className="chat-avatar legal-chat-avatar" aria-hidden="true"><Scale size={14} /></span>
-              <div className="chat-bubble chat-bubble-assistant legal-typing"><span /><span /><span /></div>
+              <div className="chat-bubble chat-bubble-assistant legal-typing"><LoaderCircle size={16} className="spin" aria-hidden="true" /><span>Searching official sources…</span></div>
             </div>
           )}
         </div>

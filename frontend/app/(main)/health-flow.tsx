@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, HeartPulse, Send, ShieldCheck } from "lucide-react";
+import { ArrowLeft, HeartPulse, Send, ShieldCheck, LoaderCircle } from "lucide-react";
 
 type HealthFlowProps = {
   onBack: () => void;
@@ -53,7 +53,8 @@ export default function HealthFlow({ onBack }: HealthFlowProps) {
   const messageList = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    messageList.current?.scrollTo({ top: messageList.current.scrollHeight, behavior: "smooth" });
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    messageList.current?.scrollTo({ top: messageList.current.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
   }, [messages, isSending]);
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
@@ -121,13 +122,13 @@ export default function HealthFlow({ onBack }: HealthFlowProps) {
 
       <section className="health-panel" aria-label="Conversation with Aegis Health">
         <div className="health-panel-topbar">
-          <div className="health-status"><span className="health-status-dot" aria-hidden="true" /> Online first · offline fallback</div>
+          <div className="health-status"><ShieldCheck size={14} aria-hidden="true" /> Online first · offline fallback</div>
           <span className="health-scope-badge">
             <ShieldCheck size={12} aria-hidden="true" /> Judgment-free
           </span>
         </div>
 
-        <div className="health-messages" ref={messageList} data-lenis-prevent aria-live="polite">
+        <div className="health-messages" ref={messageList} aria-live="polite">
           {messages.map((message) => (
             <div className={`chat-row chat-row-${message.role}`} key={message.id}>
               {message.role === "assistant" && (
@@ -150,7 +151,7 @@ export default function HealthFlow({ onBack }: HealthFlowProps) {
               <span className="chat-avatar health-chat-avatar" aria-hidden="true">
                 <HeartPulse size={14} />
               </span>
-              <div className="chat-bubble chat-bubble-assistant chat-typing"><span /><span /><span /></div>
+              <div className="chat-bubble chat-bubble-assistant chat-typing"><LoaderCircle size={16} className="spin" aria-hidden="true" /><span>Thinking…</span></div>
             </div>
           )}
         </div>
@@ -160,7 +161,7 @@ export default function HealthFlow({ onBack }: HealthFlowProps) {
             {healthQuickQuestions.map((q) => (
               <button
                 type="button"
-                className="question-chip-pill"
+                className="question-chip"
                 key={q}
                 onClick={() => setDraft(q)}
               >
