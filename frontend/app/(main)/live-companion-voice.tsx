@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { WebSession, type SessionStatus } from "@omnidim-ai/client";
+import { AudioLines, Mic } from "lucide-react";
 
 type LiveCompanionVoiceProps = {
   chatSummary: string;
@@ -127,7 +128,7 @@ export default function LiveCompanionVoice({ chatSummary, onClose }: LiveCompani
     <section className="live-companion-voice" aria-label="Live voice conversation with Aegis">
       <div className="live-companion-voice-topbar">
         <div className="companion-status">
-          <span className={`companion-status-dot${isLive ? " is-live" : ""}`} aria-hidden="true" />
+          <Mic size={14} aria-hidden="true" />
           {statusText(status)}
         </div>
         <button className="live-companion-end" type="button" onClick={endConversation}>
@@ -136,10 +137,9 @@ export default function LiveCompanionVoice({ chatSummary, onClose }: LiveCompani
       </div>
 
       <div className={`live-companion-stage${isLive ? " is-live" : ""}`}>
-        <div className="live-companion-orb" aria-hidden="true">
-          <span className="live-companion-orb-core" />
-          <span className="live-companion-orb-ring live-companion-orb-ring-one" />
-          <span className="live-companion-orb-ring live-companion-orb-ring-two" />
+        <div className="live-voice-symbol" aria-hidden="true"><AudioLines size={26} /></div>
+        <div className="voice-waveform" aria-hidden="true">
+          <span /><span /><span /><span /><span />
         </div>
         <p className="live-companion-stage-title">
           {isLive ? "I’m listening" : isBusy ? "Getting things ready…" : "Voice conversation"}

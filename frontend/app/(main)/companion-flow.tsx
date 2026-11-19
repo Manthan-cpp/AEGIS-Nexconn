@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import LiveCompanionVoice from "./live-companion-voice";
 import { BreathingGuide } from "../../components/motion/breathing-guide";
-import { ArrowLeft, Sparkles, Send, Mic, Volume2, VolumeX, Wind, Phone, ExternalLink, Copy, Check, Trash2 } from "lucide-react";
+import { ArrowLeft, Sparkles, Send, Mic, Volume2, VolumeX, Wind, Phone, ExternalLink, Copy, Check, Trash2, LoaderCircle, ShieldCheck } from "lucide-react";
 
 type CompanionFlowProps = {
   onBack: () => void;
@@ -147,7 +147,8 @@ export default function CompanionFlow({ onBack }: CompanionFlowProps) {
   }, []);
 
   useEffect(() => {
-    messageList.current?.scrollTo({ top: messageList.current.scrollHeight, behavior: "smooth" });
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    messageList.current?.scrollTo({ top: messageList.current.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
   }, [messages, isSending]);
 
   function speak(text: string) {
@@ -306,7 +307,8 @@ export default function CompanionFlow({ onBack }: CompanionFlowProps) {
   return (
     <section className="companion-flow" aria-labelledby="companion-title">
       <button className="back-link" type="button" onClick={onBack}>
-        <span aria-hidden="true"><ArrowLeft size={14} /></span> Back to toolkit
+        <ArrowLeft size={15} aria-hidden="true" />
+        <span>Back to toolkit</span>
       </button>
 
       <div className="companion-heading">
@@ -321,7 +323,7 @@ export default function CompanionFlow({ onBack }: CompanionFlowProps) {
         <div className="companion-panel-topbar">
           <div>
             <div className="companion-status">
-              <span className="companion-status-dot" aria-hidden="true" />
+              <ShieldCheck size={14} aria-hidden="true" />
               Here with you
             </div>
             <p className="companion-voice-hint">You can also talk with Aegis live.</p>
@@ -386,7 +388,7 @@ export default function CompanionFlow({ onBack }: CompanionFlowProps) {
           </aside>
         )}
 
-        <div className="companion-messages" ref={messageList} data-lenis-prevent aria-live="polite">
+        <div className="companion-messages" ref={messageList} aria-live="polite">
           {messages.map((message) => (
             <div className={`chat-row chat-row-${message.role}`} key={message.id}>
               {message.role === "assistant" && <span className="chat-avatar" aria-hidden="true"><Sparkles size={14} /></span>}
@@ -413,7 +415,7 @@ export default function CompanionFlow({ onBack }: CompanionFlowProps) {
           {isSending && (
             <div className="chat-row chat-row-assistant" aria-label="Aegis is thinking">
               <span className="chat-avatar" aria-hidden="true"><Sparkles size={14} /></span>
-              <div className="chat-bubble chat-bubble-assistant chat-typing"><span /><span /><span /></div>
+              <div className="chat-bubble chat-bubble-assistant chat-typing"><LoaderCircle size={16} className="spin" aria-hidden="true" /><span>Thinking…</span></div>
             </div>
           )}
         </div>
