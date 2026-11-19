@@ -500,6 +500,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                 className={`dm-conversation-item ${selected?.conversation_id === conversation.conversation_id ? "is-selected" : ""}`}
                 type="button"
                 key={conversation.conversation_id}
+                aria-pressed={selected?.conversation_id === conversation.conversation_id}
                 onClick={() => selectConversation(conversation)}
               >
                 <span className="dm-profile-avatar" aria-hidden="true">{conversation.recipient.username.slice(0, 1).toUpperCase()}</span>
@@ -561,7 +562,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                   </button>
                 </div>
               )}
-              <div className="dm-messages" data-lenis-prevent aria-live="polite">
+              <div className="dm-messages" aria-live="polite">
                 {messages.length === 0 && <p className="dm-empty-conversation">This is the beginning of a private conversation.</p>}
                 {messages.map((message) => (
                   <div
@@ -572,7 +573,10 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                     tabIndex={selectionMode ? 0 : undefined}
                     onClick={selectionMode ? () => toggleMessageSelection(message.message_id) : undefined}
                     onKeyDown={selectionMode ? (event) => {
-                      if (event.key === "Enter" || event.key === " ") toggleMessageSelection(message.message_id);
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleMessageSelection(message.message_id);
+                      }
                     } : undefined}
                   >
                     <p>{message.content}</p>
