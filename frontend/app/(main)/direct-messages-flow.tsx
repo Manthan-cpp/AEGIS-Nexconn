@@ -1029,6 +1029,9 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                   aria-describedby="dm-composer-hint"
                   onChange={(event) => handleDraftChange(event.target.value)}
                   onKeyDown={(event) => {
+                    // Hindi and other IMEs confirm a candidate with Enter, so
+                    // sending here would cut the word being composed in half.
+                    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       event.currentTarget.form?.requestSubmit();
