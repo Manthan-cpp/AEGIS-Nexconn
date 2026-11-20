@@ -1,0 +1,24 @@
+{
+  "label": "",
+  "generated_at": "2026-11-20T10:01:00Z",
+  "users": 6,
+  "pairs": 3,
+  "messages_attempted": 8,
+  "messages_failed": 0,
+  "token_issuance": {
+    "count": 6,
+    "avg_ms": 297.8,
+    "p50_ms": 296.3,
+    "p95_ms": 347.1,
+    "max_ms": 347.1
+  },
+  "send_latency": {
+    "count": 8,
+    "avg_ms": 289.9,
+    "p50_ms": 289.1,
+    "p95_ms": 307.4,
+    "max_ms": 307.4
+  },
+  "history_service": "disabled",
+  "first_delivery_latency_ms": null
+}

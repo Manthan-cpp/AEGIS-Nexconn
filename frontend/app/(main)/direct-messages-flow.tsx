@@ -224,6 +224,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [call, setCall] = useState<CallState>(getCallState);
   const [isCallBusy, setIsCallBusy] = useState(false);
+  const [callAllowed, setCallAllowed] = useState(false);
   const [connection, setConnection] = useState<"connecting" | "ready" | "unavailable">("connecting");
   const [presence, setPresence] = useState<Record<string, boolean>>({});
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
@@ -308,6 +309,28 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       return next;
     });
   }, [request]);
+
+  // Calls are gated by the backend, not by this component. The peer's Nexconn
+  // id is resolved back to a signed-in account, and a conversation has to
+  // exist before the Call button turns on.
+  useEffect(() => {
+    const peerId = selected?.recipient.nexconn_user_id;
+    if (!peerId || !isSignedIn) {
+      setCallAllowed(false);
+      return;
+    }
+    let active = true;
+    request<{ allowed: boolean }>(`/nexconn/calls/authorize?peer_id=${encodeURIComponent(peerId)}`)
+      .then((verdict) => {
+        if (active) setCallAllowed(Boolean(verdict?.allowed));
+      })
+      .catch(() => {
+        if (active) setCallAllowed(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [request, selected?.conversation_id, selected?.recipient.nexconn_user_id, isSignedIn]);
 
   useEffect(() => {
     if (!isLoaded || !isSignedIn || !user || !username) return;
@@ -859,8 +882,19 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
     setIsCallBusy(true);
     setError("");
     try {
+      // The button is only a hint. Ask the server again before dialling so a
+      // crafted client cannot call a Nexconn id it has no conversation with.
+      const permission = await request<{ allowed: boolean }>(
+        `/nexconn/calls/authorize?peer_id=${encodeURIComponent(peerId)}`,
+      );
+      if (!permission?.allowed) {
+        setCallAllowed(false);
+        throw new Error("You can only call someone you already have a conversation with.");
+      }
       const result = await startAudioCall(peerId);
       if (!result.ok) setError(result.error);
+    } catch (callError: unknown) {
+      setError(callError instanceof Error ? callError.message : "Aegis could not authorize that call.");
     } finally {
       setIsCallBusy(false);
     }
@@ -1165,8 +1199,8 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                     className="dm-tool-button"
                     type="button"
                     onClick={() => void startCall()}
-                    disabled={connection !== "ready" || !selected.recipient.nexconn_user_id || isCallBusy || call.status !== "idle"}
-                    title="Start an audio call with this person"
+                    disabled={connection !== "ready" || !selected.recipient.nexconn_user_id || isCallBusy || call.status !== "idle" || !callAllowed}
+                    title={callAllowed ? "Start an audio call with this person" : "Calls unlock once you have a conversation with this person"}
                   >
                     <Phone size={12} aria-hidden="true" />
                     <span>{call.status === "outgoing" && call.peerId === activePeerId ? "Calling…" : "Call"}</span>

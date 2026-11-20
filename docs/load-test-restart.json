@@ -1,0 +1,37 @@
+{
+  "label": "restart-survival",
+  "generated_at": "2026-11-20T10:10:51Z",
+  "users": 4,
+  "pairs": 2,
+  "messages_attempted": 24,
+  "messages_failed": 0,
+  "token_issuance": {
+    "count": 4,
+    "avg_ms": 331.3,
+    "p50_ms": 324.2,
+    "p95_ms": 386.1,
+    "max_ms": 386.1
+  },
+  "send_latency": {
+    "count": 24,
+    "avg_ms": 316.0,
+    "p50_ms": 296.4,
+    "p95_ms": 394.7,
+    "max_ms": 408.5
+  },
+  "history_service": "disabled",
+  "first_delivery_latency_ms": null,
+  "aegis_backend": {
+    "url": "http://127.0.0.1:8123/health",
+    "samples": 14,
+    "down_seconds": 12.1,
+    "outages": [
+      {
+        "started_at": "2026-11-20T10:10:40Z",
+        "seconds": 12.1
+      }
+    ],
+    "messages_started_during_outage": 15,
+    "messages_completed_during_outage": 15
+  }
+}

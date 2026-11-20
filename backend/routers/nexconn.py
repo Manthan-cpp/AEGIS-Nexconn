@@ -8,10 +8,15 @@ import threading
 import time
 from collections import deque
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from services.auth import CurrentUser, get_current_user
+from services.direct_messages import (
+    CallNotAuthorized,
+    DirectMessageError,
+    authorize_call,
+)
 from services.nexconn_server import (
     NexconnError,
     issue_access_token,
@@ -94,3 +99,29 @@ def get_nexconn_token(
         app_key=nexconn_public_app_key(),
         expires_at=issued.get("expires_at") if isinstance(issued.get("expires_at"), str) else None,
     )
+
+
+@router.get("/calls/authorize")
+def authorize_call_peer(
+    response: Response,
+    peer_id: str = Query(min_length=1, max_length=64),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Confirm the caller already shares a conversation with this Nexconn user.
+
+    The Call button is only a hint; this route is what actually decides, so a
+    crafted client cannot cold-call a known Nexconn user id.
+    """
+
+    try:
+        verdict = authorize_call(user.user_id, peer_id)
+    except CallNotAuthorized as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except DirectMessageError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+
+    response.headers["Cache-Control"] = "no-store"
+    return verdict

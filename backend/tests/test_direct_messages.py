@@ -244,6 +244,42 @@ class DirectMessageApiTests(unittest.TestCase):
         self.assertEqual(search.status_code, 200)
         self.assertEqual(search.json()[0]["username"], "testa")
 
+    def test_call_authorization_allows_an_existing_conversation(self):
+        database = FakeDatabase()
+        current_user = {"value": CurrentUser("user_admin", "Admin")}
+        app.dependency_overrides[get_current_user] = lambda: current_user["value"]
+
+        with patch("services.direct_messages.mongo_database", return_value=database), TestClient(app) as client:
+            client.post("/dm/profile", json={"username": "Admin"})
+            current_user["value"] = CurrentUser("user_test_a", "testA")
+            client.post("/dm/profile", json={"username": "testA"})
+            current_user["value"] = CurrentUser("user_admin", "Admin")
+            conversation = client.post("/dm/conversations", json={"username": "testA"})
+            allowed = client.get(
+                "/nexconn/calls/authorize",
+                params={"peer_id": nexconn_user_id("user_test_a")},
+            )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertTrue(allowed.json()["allowed"])
+        self.assertEqual(allowed.json()["conversation_id"], conversation.json()["conversation_id"])
+        self.assertEqual(allowed.headers["cache-control"], "no-store")
+
+    def test_call_authorization_rejects_a_stranger(self):
+        database = FakeDatabase()
+        current_user = {"value": CurrentUser("user_admin", "Admin")}
+        app.dependency_overrides[get_current_user] = lambda: current_user["value"]
+
+        with patch("services.direct_messages.mongo_database", return_value=database), TestClient(app) as client:
+            client.post("/dm/profile", json={"username": "Admin"})
+            denied = client.get(
+                "/nexconn/calls/authorize",
+                params={"peer_id": nexconn_user_id("user_stranger")},
+            )
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertIn("conversation", denied.json()["detail"])
+
     def test_search_falls_back_when_mongo_fails_during_find(self):
         current_user = {"value": CurrentUser("user_admin", "admin")}
         app.dependency_overrides[get_current_user] = lambda: current_user["value"]

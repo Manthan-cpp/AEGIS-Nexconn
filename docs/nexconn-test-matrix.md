@@ -5,6 +5,13 @@ Nexconn `errCode 80006` because audio/video calling is not enabled for the app y
 rows are listed but marked `Blocked` rather than skipped. Group channels were not built, so
 group features are out of scope.
 
+Calling is optional in the Nexconn Build Challenge and is not part of the free chat plan, so
+enabling it needs a card on the Nexconn account. The challenge FAQ says: "The Call SDK is
+optional—simply add a credit card to your account to claim 10,000 free minutes", and the call
+pricing page lists 10K voice/video minutes to test at $0.0099 per user-minute after that. The
+Nexconn ToS (§6.2a) requires a card linked through Stripe on the Billing/Payment page before
+the services are usable.
+
 Status values: `Pass`, `Fail`, `Blocked`, `Not run`. A `Pass` must name the observation that
 proved it — "it should work" is not evidence.
 
@@ -50,7 +57,7 @@ Two demo accounts used for every two-session check:
 | MSG-7 | Duplicate-send guard | double-click Send with a slow network | Pass | two `requestSubmit()` calls in the same tick produced exactly one message in the thread. The composer now blocks on a ref, so the second submit cannot slip in before state updates land |
 | MSG-8 | Offline → reconnect delivery | go offline mid-thread, send from the other tab, come back | Not run | this browser tooling has no network-offline control, so the socket drop could not be forced. The gap is now handled in code: a `ConnectionStatusHandler` reports the link coming back and the open thread is refetched, so late messages fill in. Still unproven without a real drop |
 | MSG-9 | Disappearing message actually deletes from Nexconn | set a 10s timer, send, wait, check both tabs and history | Pass | with the 10s timer saved, the message was in the thread right after sending, gone after 14s, and still absent after a full page reload and a fresh history fetch — so the sender-side recall reached Nexconn instead of only hiding the bubble locally |
-| MSG-10 | Long conversation history (100+ messages) | scroll a long thread | Not run | pagination now exists — `fetchMessagesBefore()` pages back with `startTime` and the thread shows a "Load earlier messages" button while earlier pages exist. A short thread hides the button as expected, but the 80+ message case was not seeded, so the button itself was never clicked |
+| MSG-10 | Long conversation history (100+ messages) | seed a long thread, click Load earlier messages | Pass | 90 messages were seeded through the Server API and the thread rendered 80 of them with "Load earlier messages" visible. Clicking it fetched the older page (80 → 90 rendered) and the button disappeared once the returned page was shorter than the page size. The seeded messages were then recalled (183 recalls, all `code 0`) and the thread was checked back to its original messages |
 | MSG-11 | Enter sends, IME composition Enter does not | Japanese/Chinese IME in the composer | Pass | composing Enter and `keyCode 229` kept the draft; a normal Enter sent it |
 
 ## Bot in chat (Task 4.1)
@@ -74,7 +81,7 @@ Two demo accounts used for every two-session check:
 
 | ID | Check | How | Status | Evidence |
 |---|---|---|---|---|
-| CALL-1 | 1:1 audio call connects between two users with an open channel | two browsers, click Call | Blocked | `[NCCall][ERROR] callplus_client_start_call … errCode: 80006`; enable audio/video calling in the Nexconn console |
+| CALL-1 | 1:1 audio call connects between two users with an open channel | two browsers, click Call | Blocked | `[NCCall][ERROR] callplus_client_start_call … errCode: 80006`; enable audio/video calling in the Nexconn console. Enabling needs a card on the account first (challenge FAQ: add a card to claim 10,000 free minutes) |
 | CALL-2 | Microphone denial shows a clear message | block the mic permission, click Call | Not run | pre-flight `getUserMedia` maps denial to an explicit message |
 | CALL-3 | Answer / Mute / End work | accept on the second tab, toggle mute, hang up | Not run | depends on CALL-1 |
 | CALL-4 | Mid-call drop resets the UI | kill the network mid-call | Not run | depends on CALL-1 |
@@ -104,6 +111,29 @@ Two demo accounts used for every two-session check:
 | REG-1 | Backend test suite stays green | `cd backend && ./.venv/Scripts/python.exe -m pytest` | Pass | 122 tests ran green during Phase 3.6 / CORS work; not re-run during the hardening pass |
 | REG-2 | Frontend typecheck and production build | `cd frontend && ./node_modules/.bin/tsc --noEmit && npm run build` | Pass | both exit 0 after the reconnect, pagination and double-send changes |
 
+## Edge cases (Task 5.2)
+
+| ID | Check | How | Status | Evidence |
+|---|---|---|---|---|
+| EDGE-1 | Two tabs on the same conversation sending at once | send from both tabs in the same second | Not run | the composer guards with `sendingRef` (MSG-7), but two independent tabs were not exercised |
+| EDGE-2 | Weak network, then airplane mode and back | DevTools throttling plus an offline toggle | Not run | the browser tooling here has no offline control, same blocker as MSG-8 |
+| EDGE-3 | A 100+ message thread paginates | seed a long thread, click Load earlier messages | Pass | closed by the MSG-10 run, which seeded 90 messages, paged back to all 90 and cleaned up afterwards |
+| EDGE-4 | Expired Nexconn token recovers without a reload | wait out the token lifetime | Not run | the reconnect path re-fetches a token after 10 s down; the console controls token lifetime, so it was not forced |
+| EDGE-5 | A disappearing message expires while its thread is open | set a 10 s timer, keep the thread open | Pass | during the MSG-9 run the bubble disappeared after 14 s in both tabs while the composer stayed usable |
+
+## Phase 5 hardening checks
+
+| ID | Check | How | Status | Evidence |
+|---|---|---|---|---|
+| SEC-5 | `/nexconn/token` refuses unauthenticated callers | `curl` without a Clerk session | Pass | `401` |
+| SEC-6 | `/dm/*` refuses unauthenticated callers | `curl /dm/conversations` | Pass | `401`; also `test_private_messages_require_sign_in` |
+| SEC-7 | Timer input matches the product rule | `PATCH` settings with `seconds: 5` | Pass | `422`; the request model uses `ge=10` and the service re-validates |
+| SEC-8 | Calling is authorized server-side | attempt a call to an unrelated Nexconn id | Pass | `GET /nexconn/calls/authorize` resolves the peer's Nexconn id back to a Clerk account and requires a shared conversation. Live demo session: the existing peer returned `200 {"allowed": true, "conversation_id": …}`, the caller's own id and an unknown id both `403`, and no session `401`. In the UI the check fired when the thread opened, the Call button enabled for the allowed peer, and with the route forced to `403` the button stayed disabled with "Calls unlock once you have a conversation with this person" |
+| PERF-1 | Token and send latency under a small concurrent load | `scripts/load_test_nexconn.py --users 6 --messages 8` | Pass | 6/6 tokens p95 347 ms; 8/8 sends p95 307 ms (`docs/load-test-baseline.json`) |
+| PERF-2 | Messages keep flowing while the AEGIS backend restarts | run the script with `--aegis-url`, kill the backend, restart it | Pass | of 24 sends at 2/s, 15 started and 15 completed inside the single 12.1 s outage, with 0 failures at the end. The report now records the outage window and matches sends against it (`docs/load-test-restart.json`) |
+| PERF-3 | Server-side message history is available for latency checks | `POST /v4/direct-channel/history-message/list` | Blocked | `code 1009` — "The history message service is not enabled"; delivery timing has to come from the browser SDK |
+| REC-1 | A Mongo outage falls back to the durable local store | unit tests with Mongo down and with a failing query | Pass | `test_private_messages_use_durable_local_store_when_mongo_is_unavailable` and `test_search_falls_back_when_mongo_fails_during_find`; the suite ran 7/7 OK |
+
 ### Multi-device read receipts
 
 Read receipts are acknowledged by the client that has the thread open, and Nexconn's server-side
@@ -120,5 +150,6 @@ Ordered by how much a judge or a first-time user would notice:
    something outside the repo.
 2. MSG-8 reconnect delivery — the recovery path is written, but needs a real socket drop before
    this row can move off `Not run`.
-3. AUTH-3 and MSG-10 — both are implemented and only need a long idle and an 80+ message thread
-   to observe.
+3. AUTH-3 — an expired Nexconn token has to be waited out, because the console owns the token
+   lifetime and the dev setup never forces an expiry.
+4. EDGE-1, EDGE-2 and EDGE-4 — two-tab simultaneous send, weak network, and a token expiry.

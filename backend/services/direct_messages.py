@@ -22,6 +22,7 @@ from services.direct_message_store import (
     MIN_DISAPPEARING_SECONDS,
 )
 from services.mongo import mark_mongo_unavailable, mongo_database
+from services.nexconn_server import nexconn_user_id
 
 
 class DirectMessageError(RuntimeError):
@@ -30,6 +31,10 @@ class DirectMessageError(RuntimeError):
 
 class InvalidDisappearingSettings(DirectMessageError):
     """A disappearing-message setting that does not meet the product rules."""
+
+
+class CallNotAuthorized(DirectMessageError):
+    """A call attempt to someone the caller has no conversation with."""
 
 
 def validate_disappearing_seconds(seconds: int) -> int:
@@ -321,3 +326,28 @@ def update_conversation_settings(
         return _local_result(
             lambda: _local_store.update_settings(user_id, conversation_id, enabled, validated_seconds)
         )
+
+
+def authorize_call(user_id: str, peer_nexconn_id: str) -> dict[str, Any]:
+    """Allow a call only between accounts that already share a conversation.
+
+    The browser only knows the peer's Nexconn id, and that id is a one-way hash
+    of the Clerk user id, so authorization walks the caller's own conversations
+    and compares the derived ids instead of trusting a client-supplied account.
+    """
+
+    peer = (peer_nexconn_id or "").strip()
+    if not peer:
+        raise CallNotAuthorized("Choose a contact before starting a call.")
+
+    for conversation in list_conversations(user_id):
+        recipient = conversation.get("recipient") or {}
+        recipient_user_id = str(recipient.get("user_id", ""))
+        if recipient_user_id and nexconn_user_id(recipient_user_id) == peer:
+            return {
+                "allowed": True,
+                "conversation_id": str(conversation.get("conversation_id", "")),
+                "recipient": recipient,
+            }
+
+    raise CallNotAuthorized("You can only call someone you already have a conversation with.")
