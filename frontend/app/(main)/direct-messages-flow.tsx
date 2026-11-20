@@ -210,6 +210,8 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
 
   const channelRef = useRef<{ channel: NexconnChannel; peerId: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const pinnedToBottomRef = useRef(true);
   const recalledRef = useRef<Set<string>>(new Set());
   const lastTypingSentRef = useRef(0);
 
@@ -384,6 +386,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     };
 
     const start = async () => {
+      pinnedToBottomRef.current = true;
       setMessages([]);
       setNotice("");
       setError("");
@@ -541,6 +544,15 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
   }, [conversations, previews]);
 
   const isPeerTyping = Boolean(typingChannelId && activeChannelIds.includes(typingChannelId));
+
+  // Follow the newest message, but never yank the view away from someone who
+  // scrolled up to read earlier messages.
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list || !pinnedToBottomRef.current) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    list.scrollTo({ top: list.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
+  }, [messages, activeConversationId, isPeerTyping]);
 
   if (!isLoaded) {
     return <section className="dm-flow"><p className="dm-muted">Loading account…</p></section>;
@@ -801,6 +813,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                     />
                   </span>
                   <span><strong>{profile.display_name}</strong><small>@{profile.username}</small></span>
+                  {profile.nexconn_user_id && presence[profile.nexconn_user_id] ? <span className="sr-only">Online</span> : null}
                 </button>
               ))}
             </div>
@@ -838,6 +851,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                       : (conversation.last_message || "Conversation started")}
                   </em>
                 </span>
+                {conversation.recipient.nexconn_user_id && presence[conversation.recipient.nexconn_user_id] ? <span className="sr-only">Online</span> : null}
               </button>
             ))}
           </div>
@@ -907,7 +921,18 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                   </button>
                 </div>
               )}
-              <div className="dm-messages" aria-live="polite">
+              <div
+                className="dm-messages"
+                ref={messageListRef}
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
+                aria-label={`Conversation with ${selected.recipient.display_name}`}
+                onScroll={(event) => {
+                  const list = event.currentTarget;
+                  pinnedToBottomRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+                }}
+              >
                 {messages.length === 0 && (
                   <p className="dm-empty-conversation">
                     {connection === "ready" ? "This is the beginning of a private conversation." : "Connecting to secure messaging…"}
@@ -997,10 +1022,18 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                 >
                   <Paperclip size={16} aria-hidden="true" />
                 </button>
+                <span className="sr-only" id="dm-composer-hint">Press Enter to send and Shift plus Enter for a new line.</span>
                 <textarea
                   id="dm-message"
                   value={draft}
+                  aria-describedby="dm-composer-hint"
                   onChange={(event) => handleDraftChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
                   placeholder={connection === "ready" ? "Write a private message…" : "Connecting to secure messaging…"}
                   maxLength={2_000}
                   rows={3}
