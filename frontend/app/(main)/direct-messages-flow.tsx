@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, CheckCheck, Clock, FileText, MessageSquare, Paperclip, RefreshCw, Search, Send, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, CheckCheck, Clock, FileText, MessageSquare, Mic, MicOff, Paperclip, Phone, PhoneOff, RefreshCw, Search, Send, Trash2 } from "lucide-react";
 import { SignInButton, SignUpButton, useAuth, useUser } from "@clerk/nextjs";
 import {
   type NexconnAttachment,
@@ -25,6 +25,7 @@ import {
   subscribeToReceipts,
   subscribeToTyping,
 } from "./nexconn-client";
+import { acceptIncomingCall, endActiveCall, getCallState, setCallMuted, startAudioCall, subscribeToCalls, type CallState } from "./nexconn-call";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8123";
 const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
@@ -87,6 +88,7 @@ type Message = {
   expires_at: string | null;
   is_from_me: boolean;
   read?: boolean;
+  is_bot?: boolean;
 };
 
 const ATTACHMENT_ACCEPT = [
@@ -129,6 +131,7 @@ function toUiMessage(message: NexconnChatMessage): Message {
     expires_at: Number.isNaN(parsed) ? null : new Date(parsed).toISOString(),
     is_from_me: message.isFromMe,
     read: false,
+    is_bot: message.metadata["aegis_bot"] === "companion",
   };
 }
 
@@ -208,6 +211,8 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [call, setCall] = useState<CallState>(getCallState);
+  const [isCallBusy, setIsCallBusy] = useState(false);
   const [connection, setConnection] = useState<"connecting" | "ready" | "unavailable">("connecting");
   const [presence, setPresence] = useState<Record<string, boolean>>({});
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
@@ -348,6 +353,8 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       setTypingChannelId((current) => (isTyping ? channelId : current === channelId ? null : current));
     });
   }, [connection]);
+
+  useEffect(() => subscribeToCalls(setCall), []);
 
   useEffect(() => {
     if (connection !== "ready") return;
@@ -658,6 +665,14 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
         ...current,
         [selected.conversation_id]: { text: previewOf(sent.data), sentAt: sent.data.sentAt, fromMe: true },
       }));
+
+      // Nexconn direct channels are one-to-one, so a bot cannot join the
+      // thread itself. The reply is posted back into the same channel and
+      // tagged with metadata so both clients can label it.
+      const companionPrompt = content.replace(/^\/companion\s+/i, "").trim();
+      if (companionPrompt !== content) {
+        void replyAsCompanion(channelResult.data, companionPrompt, selected.conversation_id);
+      }
     } finally {
       setIsSending(false);
     }
@@ -745,6 +760,62 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       setError(requestError instanceof Error ? requestError.message : "Aegis could not save that setting.");
     } finally {
       setIsSavingSettings(false);
+    }
+  }
+
+  async function startCall() {
+    const peerId = selected?.recipient.nexconn_user_id;
+    if (!peerId || isCallBusy) return;
+    setIsCallBusy(true);
+    setError("");
+    try {
+      const result = await startAudioCall(peerId);
+      if (!result.ok) setError(result.error);
+    } finally {
+      setIsCallBusy(false);
+    }
+  }
+
+  async function answerCall() {
+    setError("");
+    const result = await acceptIncomingCall();
+    if (!result.ok) setError(result.error);
+  }
+
+  async function replyAsCompanion(channel: NexconnChannel, prompt: string, conversationId: string) {
+    if (!prompt) return;
+    setNotice("Aegis Companion is replying…");
+    try {
+      const response = await fetch(`${API_BASE_URL}/companion/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: `dm-${conversationId}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 100),
+          message: prompt.slice(0, 1_500),
+          memory_consent: false,
+          context_turns: [],
+        }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof body?.detail === "string" ? body.detail : "Aegis Companion could not reply.");
+      }
+      const reply = typeof body?.reply === "string" ? body.reply.trim() : "";
+      if (!reply) throw new Error("Aegis Companion could not reply.");
+
+      const sent = await sendText(channel, `Aegis Companion: ${reply}`, {
+        needReceipt: true,
+        metadata: { aegis_conversation_id: conversationId, aegis_bot: "companion" },
+      });
+      if (!sent.ok) throw new Error(sent.error);
+      setMessages((current) => mergeMessages(current, [toUiMessage(sent.data)]));
+      setPreviews((current) => ({
+        ...current,
+        [conversationId]: { text: previewOf(sent.data), sentAt: sent.data.sentAt, fromMe: true },
+      }));
+      setNotice("Aegis Companion replied in this conversation.");
+    } catch (companionError: unknown) {
+      setError(companionError instanceof Error ? companionError.message : "Aegis Companion could not reply.");
     }
   }
 
@@ -934,6 +1005,16 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                     <Clock size={12} aria-hidden="true" />
                     <span>{selected.disappearing_enabled ? `${disappearingLabel(selected.disappearing_seconds)} disappearing` : "Disappearing"}</span>
                   </button>
+                  <button
+                    className="dm-tool-button"
+                    type="button"
+                    onClick={() => void startCall()}
+                    disabled={connection !== "ready" || !selected.recipient.nexconn_user_id || isCallBusy || call.status !== "idle"}
+                    title="Start an audio call with this person"
+                  >
+                    <Phone size={12} aria-hidden="true" />
+                    <span>{call.status === "outgoing" ? "Calling…" : "Call"}</span>
+                  </button>
                   {onPrepareAlert && (
                     <button
                       className="dm-tool-button"
@@ -987,6 +1068,34 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                   </button>
                 </div>
               )}
+              {call.status !== "idle" && (
+                <div className={`dm-call-banner is-${call.status}`} role="status">
+                  <span>
+                    {call.status === "incoming"
+                      ? `${selected.recipient.display_name} is calling`
+                      : call.status === "outgoing"
+                        ? `Calling ${selected.recipient.display_name}…`
+                        : `In a call with ${selected.recipient.display_name}`}
+                  </span>
+                  <div className="dm-call-actions">
+                    {call.status === "incoming" && (
+                      <button className="dm-primary-button" type="button" onClick={() => void answerCall()}>
+                        Answer
+                      </button>
+                    )}
+                    {call.status === "connected" && (
+                      <button className="dm-secondary-button" type="button" onClick={() => void setCallMuted(!call.muted)}>
+                        {call.muted ? <MicOff size={12} aria-hidden="true" /> : <Mic size={12} aria-hidden="true" />}
+                        <span>{call.muted ? "Unmute" : "Mute"}</span>
+                      </button>
+                    )}
+                    <button className="dm-delete-button" type="button" onClick={() => void endActiveCall()}>
+                      <PhoneOff size={12} aria-hidden="true" />
+                      <span>End</span>
+                    </button>
+                  </div>
+                </div>
+              )}
               <div
                 className="dm-messages"
                 ref={messageListRef}
@@ -1006,7 +1115,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                 )}
                 {messages.map((message) => (
                   <div
-                    className={`dm-message ${message.is_from_me ? "is-mine" : "is-theirs"} ${selectionMode ? "is-selectable" : ""} ${selectedMessageIds.includes(message.message_id) ? "is-selected" : ""}`}
+                    className={`dm-message ${message.is_from_me ? "is-mine" : "is-theirs"} ${message.is_bot ? "is-bot" : ""} ${selectionMode ? "is-selectable" : ""} ${selectedMessageIds.includes(message.message_id) ? "is-selected" : ""}`}
                     key={message.message_id}
                     role={selectionMode ? "checkbox" : undefined}
                     aria-checked={selectionMode ? selectedMessageIds.includes(message.message_id) : undefined}
@@ -1050,7 +1159,9 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                       <p>{message.content}</p>
                     )}
                     <div className="dm-message-meta">
-                      <time dateTime={message.created_at}>{message.is_from_me ? "You" : selected.recipient.display_name}</time>
+                      <time dateTime={message.created_at}>
+                        {message.is_bot ? "Aegis Companion" : message.is_from_me ? "You" : selected.recipient.display_name}
+                      </time>
                       {message.is_from_me && (
                         <span
                           className={`dm-receipt ${message.read ? "is-read" : ""}`}
@@ -1088,7 +1199,10 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                 >
                   <Paperclip size={16} aria-hidden="true" />
                 </button>
-                <span className="sr-only" id="dm-composer-hint">Press Enter to send and Shift plus Enter for a new line.</span>
+                <span className="sr-only" id="dm-composer-hint">
+                  Press Enter to send and Shift plus Enter for a new line. Start a message with /companion to ask Aegis
+                  Companion for support in this conversation.
+                </span>
                 <textarea
                   id="dm-message"
                   value={draft}

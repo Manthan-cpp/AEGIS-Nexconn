@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^7.7.9",
+    "@nexconn/call": "^26.2.1",
     "@nexconn/chat": "^26.5.1",
     "@nexconn/engine": "^26.5.1",
     "@omnidim-ai/client": "^0.1.0",

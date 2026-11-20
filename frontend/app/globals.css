@@ -3701,3 +3701,45 @@ select:focus-visible,
 .dm-typing.is-visible {
   opacity: 1;
 }
+
+/* Bot replies inside a direct conversation */
+.dm-message.is-bot {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.dm-message.is-bot .dm-message-meta time {
+  color: var(--accent-strong, var(--accent));
+  font-weight: 600;
+}
+
+/* Call banner above the message list */
+.dm-call-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  font-size: 0.86rem;
+}
+
+.dm-call-banner > span {
+  font-weight: 600;
+}
+
+.dm-call-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.dm-call-actions .dm-primary-button,
+.dm-call-actions .dm-secondary-button,
+.dm-call-actions .dm-delete-button {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
