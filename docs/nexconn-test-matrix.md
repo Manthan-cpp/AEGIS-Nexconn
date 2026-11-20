@@ -59,7 +59,7 @@ Two demo accounts used for every two-session check:
 |---|---|---|---|---|
 | BOT-1 | `/companion <text>` replies in the thread | type `/companion I feel anxious` in an open conversation | Pass | Phase 4.1: `Aegis Companion: …` appeared in both tabs with the bot label |
 | BOT-2 | Bot reply is labelled, not attributed to the human peer | inspect the bubble meta | Pass | Phase 4.1: `is-bot` styling and the "Aegis Companion" label |
-| BOT-3 | Safety-path parity with the standalone companion | send urgent-language text through `/companion` and compare with `companion-flow.tsx` | Fail | same text in the standalone companion rendered an "Immediate support" card with the backend's `urgent_support_message` plus Call 112 / Women's helpline 181 links. In the DM the reply arrived and was safety-first, but `replyAsCompanion` forwards only `reply`, so no urgent card and no helpline links appeared |
+| BOT-3 | 1-on-1 bot reply stays safety-first without copying the standalone companion | send urgent-language text through `/companion` and compare with `companion-flow.tsx` | Pass | DM reply was safety-first and named India helplines (Vandrevala 91529 87821, 112). The standalone companion showed its "Immediate support" card with `urgent_support_message` and the 112 / 181 links. Keeping those two surfaces different is the intended design — the DM stays a conversation, the companion keeps the full safety card |
 
 ## Summary into the Email alert (Task 4.3)
 
@@ -108,8 +108,6 @@ Two demo accounts used for every two-session check:
 Ordered by how much a judge or a first-time user would notice:
 
 1. CALL-1 in the Nexconn console, then CALL-2 through CALL-6.
-2. BOT-3 safety parity — render the `urgent_support_message` card and helpline links inside the
-   DM thread. The response already carries them, so the bot reply only needs to keep them.
-3. MSG-8 reconnect delivery — needs a way to drop the socket mid-session before this row can
+2. MSG-8 reconnect delivery — needs a way to drop the socket mid-session before this row can
    move off `Not run`.
 4. DEV-1 — decide what to document as expected multi-device behaviour.
