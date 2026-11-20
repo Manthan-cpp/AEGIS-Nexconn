@@ -3743,3 +3743,35 @@ select:focus-visible,
   padding: 6px 12px;
   font-size: 0.8rem;
 }
+
+/* Compact call strip: keeps mute and hang-up reachable while another
+   conversation is open, without taking over the message area. */
+.dm-call-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.dm-call-indicator > svg {
+  color: var(--accent);
+  flex: none;
+}
+
+.dm-call-indicator-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.dm-call-indicator .dm-call-actions {
+  margin-left: auto;
+}
+
+.dm-call-indicator.is-incoming {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}

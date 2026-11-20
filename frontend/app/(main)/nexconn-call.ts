@@ -75,7 +75,16 @@ async function ensureEngine(): Promise<{ ok: true; sdk: CallSdk; engine: NCCallE
 
     const handler: NCCallEventHandler = {
       onCallReceived(event) {
-        emit({ status: "incoming", callId: event.session.getCallId(), muted: false, error: null });
+        // The caller id keeps the ringing banner attached to the conversation
+        // the call actually belongs to, and the call id is what acceptCall
+        // needs later.
+        emit({
+          status: "incoming",
+          callId: event.session.getCallId(),
+          peerId: event.session.getCallerUserId() || null,
+          muted: false,
+          error: null,
+        });
       },
       onCallConnected() {
         emit({ status: "connected" });

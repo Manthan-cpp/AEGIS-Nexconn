@@ -19,6 +19,13 @@
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
+  "//overrides": "@nexconn/call pins its chat/engine peers to exactly 26.2.0. Reuse the installed tree instead of downgrading, so npm install works without --legacy-peer-deps.",
+  "overrides": {
+    "@nexconn/call": {
+      "@nexconn/chat": "$@nexconn/chat",
+      "@nexconn/engine": "$@nexconn/engine"
+    }
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",

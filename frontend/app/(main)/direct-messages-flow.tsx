@@ -356,6 +356,27 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
 
   useEffect(() => subscribeToCalls(setCall), []);
 
+  const focusConversationForPeer = useCallback((peerId: string | null) => {
+    if (!peerId) return;
+    const target = conversations.find((conversation) => conversation.recipient.nexconn_user_id === peerId);
+    if (!target) return;
+    setSelected(target);
+    setSettingsEnabled(target.disappearing_enabled);
+    setSettingsSeconds(String(target.disappearing_seconds || 21600));
+    setIsSettingsOpen(false);
+    setSelectionMode(false);
+    setSelectedMessageIds([]);
+  }, [conversations]);
+
+  // A ringing call belongs to the conversation it arrived in, so bring that
+  // thread to the front instead of ringing over an unrelated chat.
+  useEffect(() => {
+    if (call.status !== "incoming" || !call.peerId) return;
+    const target = conversations.find((conversation) => conversation.recipient.nexconn_user_id === call.peerId);
+    if (!target || selected?.conversation_id === target.conversation_id) return;
+    focusConversationForPeer(call.peerId);
+  }, [call.peerId, call.status, conversations, focusConversationForPeer, selected?.conversation_id]);
+
   useEffect(() => {
     if (connection !== "ready") return;
     return subscribeToDeletions((_channelId, messageIds) => {
@@ -566,6 +587,14 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     list.scrollTo({ top: list.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
   }, [messages, activeConversationId, isPeerTyping]);
+
+  // A call outlives the conversation view it started in, so the compact
+  // indicator needs the other side's name even while another thread is open.
+  const activeCallPeer = useMemo(() => {
+    if (call.status === "idle" || !call.peerId) return null;
+    const conversation = conversations.find((item) => item.recipient.nexconn_user_id === call.peerId);
+    return { peerId: call.peerId, name: conversation?.recipient.display_name ?? "this contact" };
+  }, [call.peerId, call.status, conversations]);
 
   if (!isLoaded) {
     return <section className="dm-flow"><p className="dm-muted">Loading account…</p></section>;
@@ -909,6 +938,38 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
         </button>
         <span className="dm-account-chip">@{username}</span>
       </div>
+      {activeCallPeer && call.peerId !== activePeerId && (
+        <div className={`dm-call-indicator is-${call.status}`} role="status" aria-live="polite">
+          <Phone size={13} aria-hidden="true" />
+          <span className="dm-call-indicator-label">
+            {call.status === "incoming"
+              ? `${activeCallPeer.name} is calling`
+              : call.status === "outgoing"
+                ? `Calling ${activeCallPeer.name}…`
+                : `In a call with ${activeCallPeer.name}`}
+          </span>
+          <div className="dm-call-actions">
+            <button className="dm-small-button" type="button" onClick={() => focusConversationForPeer(activeCallPeer.peerId)}>
+              Open chat
+            </button>
+            {call.status === "incoming" && (
+              <button className="dm-primary-button" type="button" onClick={() => void answerCall()}>
+                Answer
+              </button>
+            )}
+            {call.status === "connected" && (
+              <button className="dm-secondary-button" type="button" onClick={() => void setCallMuted(!call.muted)}>
+                {call.muted ? <MicOff size={12} aria-hidden="true" /> : <Mic size={12} aria-hidden="true" />}
+                <span>{call.muted ? "Unmute" : "Mute"}</span>
+              </button>
+            )}
+            <button className="dm-delete-button" type="button" onClick={() => void endActiveCall()}>
+              <PhoneOff size={12} aria-hidden="true" />
+              <span>End</span>
+            </button>
+          </div>
+        </div>
+      )}
       <div className="dm-header-copy">
         <p className="eyebrow">Private conversations</p>
         <h2 id="dm-title">A quiet line to someone you trust.</h2>
@@ -1013,7 +1074,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                     title="Start an audio call with this person"
                   >
                     <Phone size={12} aria-hidden="true" />
-                    <span>{call.status === "outgoing" ? "Calling…" : "Call"}</span>
+                    <span>{call.status === "outgoing" && call.peerId === activePeerId ? "Calling…" : "Call"}</span>
                   </button>
                   {onPrepareAlert && (
                     <button
@@ -1068,7 +1129,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                   </button>
                 </div>
               )}
-              {call.status !== "idle" && (
+              {call.status !== "idle" && call.peerId === activePeerId && (
                 <div className={`dm-call-banner is-${call.status}`} role="status">
                   <span>
                     {call.status === "incoming"
