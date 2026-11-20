@@ -11,15 +11,18 @@ import {
   connect,
   deleteMessages,
   fetchLatestMessage,
+  fetchMessagesBefore,
   fetchRecentMessages,
   getOrCreateDirectChannel,
   markMessagesRead,
+  reconnect,
   sendFile,
   sendImage,
   sendText,
   sendTyping,
   setSessionTokenProvider,
   subscribe,
+  subscribeToConnection,
   subscribeToDeletions,
   subscribeToPresence,
   subscribeToReceipts,
@@ -34,6 +37,10 @@ const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 // the delivery path it used to be.
 const POLL_INTERVAL_MS = 8_000;
 const EXPIRY_TICK_MS = 5_000;
+const EARLIER_PAGE_SIZE = 50;
+// A dropped link recovers on its own most of the time, so wait before asking
+// for a new token.
+const RECONNECT_GRACE_MS = 10_000;
 const TYPING_THROTTLE_MS = 5_000;
 
 type Profile = {
@@ -200,6 +207,10 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
+  const [hasEarlier, setHasEarlier] = useState(true);
+  // State updates land a tick late, so a ref is what actually stops a double submit.
+  const sendingRef = useRef(false);
   const [isUploading, setIsUploading] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -356,6 +367,51 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
 
   useEffect(() => subscribeToCalls(setCall), []);
 
+  // Messages sent while the socket was down arrive late, so the open thread is
+  // refetched once the link returns. If it stays down, the Nexconn token may
+  // have lapsed, and only the backend can issue a new one.
+  useEffect(() => {
+    let wasDown = false;
+    let askedForToken = false;
+    let retryTimer: number | null = null;
+
+    const clearRetry = () => {
+      if (retryTimer === null) return;
+      window.clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+
+    const unsubscribe = subscribeToConnection((state) => {
+      if (state === "connected") {
+        clearRetry();
+        const missed = wasDown;
+        const channel = channelRef.current?.channel;
+        wasDown = false;
+        askedForToken = false;
+        if (!missed || !channel) return;
+        void fetchRecentMessages(channel, 80).then((page) => {
+          if (!page.ok) return;
+          setMessages((current) => mergeMessages(current, page.data.map(toUiMessage)));
+        });
+        return;
+      }
+
+      wasDown = true;
+      if (askedForToken) return;
+      clearRetry();
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        askedForToken = true;
+        void reconnect();
+      }, RECONNECT_GRACE_MS);
+    });
+
+    return () => {
+      unsubscribe();
+      clearRetry();
+    };
+  }, []);
+
   const focusConversationForPeer = useCallback((peerId: string | null) => {
     if (!peerId) return;
     const target = conversations.find((conversation) => conversation.recipient.nexconn_user_id === peerId);
@@ -410,6 +466,8 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
     let unsubscribeMessages: Array<() => void> = [];
     let pollTimer: number | null = null;
     const readConfirmed = new Set<string>();
+    // A fresh thread starts from its newest page, so earlier pages may exist.
+    setHasEarlier(true);
 
     const confirmRead = (incoming: NexconnChatMessage[]) => {
       if (!channel) return;
@@ -453,6 +511,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       if (!active) return;
       if (history.ok) {
         setMessages(history.data.map(toUiMessage));
+        setHasEarlier(history.data.length >= 80);
         confirmRead(history.data);
         const latest = history.data[history.data.length - 1];
         if (latest) {
@@ -657,13 +716,14 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected || !draft.trim() || isSending) return;
+    if (!selected || !draft.trim() || sendingRef.current) return;
     const peerId = selected.recipient.nexconn_user_id;
     if (!peerId) {
       setError("This contact cannot receive Nexconn messages yet. Ask them to sign in once more.");
       return;
     }
 
+    sendingRef.current = true;
     setIsSending(true);
     setError("");
     setNotice("");
@@ -703,6 +763,7 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
         void replyAsCompanion(channelResult.data, companionPrompt, selected.conversation_id);
       }
     } finally {
+      sendingRef.current = false;
       setIsSending(false);
     }
   }
@@ -832,7 +893,9 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       const reply = typeof body?.reply === "string" ? body.reply.trim() : "";
       if (!reply) throw new Error("Aegis Companion could not reply.");
 
-      const sent = await sendText(channel, `Aegis Companion: ${reply}`, {
+      // The aegis_bot metadata already labels this bubble as the companion on
+      // both clients, so the text does not repeat the name.
+      const sent = await sendText(channel, reply, {
         needReceipt: true,
         metadata: { aegis_conversation_id: conversationId, aegis_bot: "companion" },
       });
@@ -845,6 +908,38 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
       setNotice("Aegis Companion replied in this conversation.");
     } catch (companionError: unknown) {
       setError(companionError instanceof Error ? companionError.message : "Aegis Companion could not reply.");
+    }
+  }
+
+  async function loadEarlierMessages() {
+    if (!selected || isLoadingEarlier) return;
+    const peerId = selected.recipient.nexconn_user_id;
+    const oldest = messages[0];
+    if (!peerId || !oldest) return;
+
+    setIsLoadingEarlier(true);
+    setError("");
+    try {
+      const channelResult = await ensureChannel(peerId);
+      if (!channelResult.ok) {
+        setError(channelResult.error);
+        return;
+      }
+      const page = await fetchMessagesBefore(
+        channelResult.data,
+        Date.parse(oldest.created_at),
+        EARLIER_PAGE_SIZE,
+      );
+      if (!page.ok) {
+        setError(page.error);
+        return;
+      }
+      if (page.data.length) {
+        setMessages((current) => mergeMessages(current, page.data.map(toUiMessage)));
+      }
+      if (page.data.length < EARLIER_PAGE_SIZE) setHasEarlier(false);
+    } finally {
+      setIsLoadingEarlier(false);
     }
   }
 
@@ -1169,6 +1264,18 @@ function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlo
                   pinnedToBottomRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
                 }}
               >
+                {hasEarlier && messages.length > 0 && (
+                  <div className="dm-earlier-row">
+                    <button
+                      className="dm-small-button"
+                      type="button"
+                      onClick={() => void loadEarlierMessages()}
+                      disabled={isLoadingEarlier || connection !== "ready"}
+                    >
+                      {isLoadingEarlier ? "Loading earlier messages…" : "Load earlier messages"}
+                    </button>
+                  </div>
+                )}
                 {messages.length === 0 && (
                   <p className="dm-empty-conversation">
                     {connection === "ready" ? "This is the beginning of a private conversation." : "Connecting to secure messaging…"}

@@ -15,6 +15,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8
 const MESSAGE_HANDLER_ID = "aegis-direct-messages";
 const CHANNEL_HANDLER_ID = "aegis-direct-channels";
 const USER_HANDLER_ID = "aegis-direct-presence";
+const CONNECTION_HANDLER_ID = "aegis-connection-state";
 const TEXT_MESSAGE_TYPE = "RC:TxtMsg";
 const TYPING_WINDOW_MS = 6_000;
 const PRESENCE_SUBSCRIPTION_SECONDS = 3_600;
@@ -65,12 +66,16 @@ type TypingListener = (channelId: string, isTyping: boolean) => void;
 type ReceiptListener = (channelId: string, messageIds: string[]) => void;
 type DeletionListener = (channelId: string, messageIds: string[]) => void;
 type PresenceListener = (presence: Record<string, boolean>) => void;
+type ConnectionListener = (state: NexconnConnectionState) => void;
 
 export type NexconnResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; status?: number };
 
 export type SessionTokenProvider = (options?: { skipCache?: boolean }) => Promise<string | null>;
+
+/** Mirrors the SDK connection status without leaking its numeric enum. */
+export type NexconnConnectionState = "connected" | "connecting" | "suspended" | "disconnected";
 
 export type NexconnAttachment = {
   kind: "image" | "file";
@@ -115,6 +120,8 @@ const subscribedPresenceUsers = new Set<string>();
 const rawMessages = new Map<string, RawMessage>();
 const typingTimers = new Map<string, number>();
 const typingDeadlines = new Map<string, number>();
+const connectionListeners = new Set<ConnectionListener>();
+let lastConnectionState: NexconnConnectionState = "disconnected";
 
 let presenceRefreshTimer: number | null = null;
 let presencePollTimer: number | null = null;
@@ -355,6 +362,27 @@ function stopPresencePolling(): void {
   presencePollTimer = null;
 }
 
+function stateOf(status: number): NexconnConnectionState {
+  if (status === 0) return "connected";
+  if (status === 1) return "connecting";
+  if (status === 3) return "suspended";
+  return "disconnected";
+}
+
+function registerConnectionHandler(sdkModule: Sdk): void {
+  if (handlersRegistered.has(CONNECTION_HANDLER_ID)) return;
+
+  const handler = new sdkModule.ConnectionStatusHandler({
+    onConnectionStatusChanged(event) {
+      lastConnectionState = stateOf(Number(event.status));
+      for (const listener of connectionListeners) listener(lastConnectionState);
+    },
+  });
+
+  sdkModule.NCEngine.addConnectionStatusHandler(CONNECTION_HANDLER_ID, handler);
+  handlersRegistered.add(CONNECTION_HANDLER_ID);
+}
+
 function registerUserHandler(sdkModule: Sdk): void {
   if (handlersRegistered.has(USER_HANDLER_ID)) return;
 
@@ -374,6 +402,7 @@ async function ensureInitialized(sdkModule: Sdk, appKey: string): Promise<void> 
   registerMessageHandler(sdkModule);
   registerChannelHandler(sdkModule);
   registerUserHandler(sdkModule);
+  registerConnectionHandler(sdkModule);
   initialized = true;
 }
 
@@ -459,6 +488,7 @@ async function connectInternal(options: { forceRefresh?: boolean }): Promise<Nex
   }
 
   currentUserId = result.data?.userId ?? nextUserId;
+  lastConnectionState = "connected";
   return { ok: true, data: { userId: currentUserId } };
 }
 
@@ -599,13 +629,18 @@ export async function sendFile(
   return sendMediaUpload(channel, file, "file", options);
 }
 
-async function loadPage(channel: NexconnChannel, limit: number): Promise<NexconnResult<NexconnChatMessage[]>> {
+async function loadPage(
+  channel: NexconnChannel,
+  limit: number,
+  startTime?: number,
+): Promise<NexconnResult<NexconnChatMessage[]>> {
   try {
     const sdkModule = await loadSdk();
     const query = sdkModule.BaseChannel.createMessagesQuery({
       channelIdentifier: channel.identifier,
       isAscending: false,
       pageSize: Math.min(Math.max(limit, 1), 100),
+      ...(typeof startTime === "number" && Number.isFinite(startTime) ? { startTime } : {}),
     });
     const page = await query.loadNextPage();
     if (page.code !== 0) {
@@ -630,6 +665,15 @@ export async function fetchRecentMessages(
   return loadPage(channel, limit);
 }
 
+/** Older page of channel history, oldest-first, for reading further back. */
+export async function fetchMessagesBefore(
+  channel: NexconnChannel,
+  beforeSentAt: number,
+  limit = 50,
+): Promise<NexconnResult<NexconnChatMessage[]>> {
+  return loadPage(channel, limit, beforeSentAt);
+}
+
 /** Single newest message, used for conversation-list previews. */
 export async function fetchLatestMessage(channel: NexconnChannel): Promise<NexconnResult<NexconnChatMessage | null>> {
   // A small page keeps this correct whichever order the SDK returns.
@@ -652,6 +696,23 @@ export function subscribe(channelId: string, listener: (message: NexconnChatMess
     current.delete(listener);
     if (!current.size) listeners.delete(channelId);
   };
+}
+
+/**
+ * Connection state for the chat engine. The SDK retries dropped sockets on its
+ * own, so this reports what happened rather than driving the reconnect itself.
+ */
+export function subscribeToConnection(listener: ConnectionListener): () => void {
+  connectionListeners.add(listener);
+  listener(lastConnectionState);
+  return () => {
+    connectionListeners.delete(listener);
+  };
+}
+
+/** Reconnect with a freshly issued Nexconn token after a long drop. */
+export async function reconnect(): Promise<NexconnResult<{ userId: string }>> {
+  return connect({ forceRefresh: true });
 }
 
 export function subscribeToTyping(listener: TypingListener): () => void {

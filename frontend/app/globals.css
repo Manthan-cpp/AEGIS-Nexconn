@@ -3775,3 +3775,9 @@ select:focus-visible,
 .dm-call-indicator.is-incoming {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
+
+.dm-earlier-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 10px;
+}
