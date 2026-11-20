@@ -176,12 +176,17 @@ function GuestMessagesFlow({ onBack }: { onBack: () => void }) {
   );
 }
 
-export default function DirectMessagesFlow({ onBack }: { onBack: () => void }) {
+type DirectMessagesFlowProps = {
+  onBack: () => void;
+  onPrepareAlert?: (summary: string) => void;
+};
+
+export default function DirectMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlowProps) {
   if (!clerkConfigured) return <GuestMessagesFlow onBack={onBack} />;
-  return <AuthenticatedMessagesFlow onBack={onBack} />;
+  return <AuthenticatedMessagesFlow onBack={onBack} onPrepareAlert={onPrepareAlert} />;
 }
 
-function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
+function AuthenticatedMessagesFlow({ onBack, onPrepareAlert }: DirectMessagesFlowProps) {
   const { getToken } = useAuth();
   const { isLoaded, isSignedIn, user } = useUser();
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -202,6 +207,7 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
   const [connection, setConnection] = useState<"connecting" | "ready" | "unavailable">("connecting");
   const [presence, setPresence] = useState<Record<string, boolean>>({});
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
@@ -742,6 +748,54 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
     }
   }
 
+  async function prepareAlertSummary() {
+    if (!selected || !onPrepareAlert || isSummarizing) return;
+
+    // Summaries only make sense for written text, oldest first, newest kept
+    // when the conversation is longer than the endpoint accepts.
+    const transcript: string[] = [];
+    let budget = 7_500;
+    for (let index = messages.length - 1; index >= 0 && transcript.length < 40; index -= 1) {
+      const text = messages[index].content.trim();
+      if (!text) continue;
+      if (text.length > budget) break;
+      budget -= text.length;
+      transcript.unshift(text);
+    }
+    if (!transcript.length) {
+      setError("Aegis needs a few written messages before it can prepare a summary.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Aegis will summarize the recent written messages in this conversation and open Email support with that summary filled in. Nothing is sent until you review it there. Continue?",
+    );
+    if (!confirmed) return;
+
+    setIsSummarizing(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/companion/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_messages: transcript }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof body?.detail === "string" ? body.detail : "Aegis could not prepare that summary.");
+      }
+      const summary = typeof body?.summary === "string" ? body.summary.trim() : "";
+      if (!summary) throw new Error("Aegis could not prepare that summary.");
+      setNotice("Summary ready. Review it in Email support before anything is sent.");
+      onPrepareAlert(summary);
+    } catch (summaryError: unknown) {
+      setError(summaryError instanceof Error ? summaryError.message : "Aegis could not prepare that summary.");
+    } finally {
+      setIsSummarizing(false);
+    }
+  }
+
   async function deleteSelectedMessages() {
     if (!selected || selectedMessageIds.length === 0) return;
     const peerId = selected.recipient.nexconn_user_id;
@@ -880,6 +934,18 @@ function AuthenticatedMessagesFlow({ onBack }: { onBack: () => void }) {
                     <Clock size={12} aria-hidden="true" />
                     <span>{selected.disappearing_enabled ? `${disappearingLabel(selected.disappearing_seconds)} disappearing` : "Disappearing"}</span>
                   </button>
+                  {onPrepareAlert && (
+                    <button
+                      className="dm-tool-button"
+                      type="button"
+                      onClick={() => void prepareAlertSummary()}
+                      disabled={isSummarizing || !messages.some((message) => message.content.trim())}
+                      title="Summarize this conversation and open Email support with it"
+                    >
+                      <FileText size={12} aria-hidden="true" />
+                      <span>{isSummarizing ? "Summarizing…" : "Prepare alert"}</span>
+                    </button>
+                  )}
                   <button className={`dm-tool-button ${selectionMode ? "is-active" : ""}`} type="button" onClick={() => {
                     setSelectionMode((current) => !current);
                     setSelectedMessageIds([]);

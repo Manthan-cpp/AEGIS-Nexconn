@@ -65,6 +65,7 @@ const features: { id: Exclude<ToolId, "home">; title: string; description: strin
 
 export default function MainApp({ onPanicExit }: MainAppProps) {
   const [activeTool, setActiveTool] = useState<ToolId>("home");
+  const [emailSummary, setEmailSummary] = useState("");
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [expandedGroup, setExpandedGroup] = useState<NavGroup>(null);
   const [showBreathing, setShowBreathing] = useState(false);
@@ -114,7 +115,17 @@ export default function MainApp({ onPanicExit }: MainAppProps) {
   }, [isNavOpen]);
 
   function goTo(tool: ToolId) {
+    setEmailSummary("");
     setActiveTool(tool);
+    setIsNavOpen(false);
+    setExpandedGroup(null);
+  }
+
+  // A conversation can hand a prepared summary to Email support. This only
+  // passes a string, so the email tool stays independent of messaging.
+  function prepareEmailAlert(summary: string) {
+    setEmailSummary(summary);
+    setActiveTool("email");
     setIsNavOpen(false);
     setExpandedGroup(null);
   }
@@ -233,12 +244,12 @@ export default function MainApp({ onPanicExit }: MainAppProps) {
         <div className={`aegis-view-shell${activeTool === "home" ? " aegis-home-view" : ""}`} key={activeTool}>
           {activeTool === "sos" && <SosFlow onBack={() => goTo("home")} />}
           {activeTool === "companion" && <CompanionFlow onBack={() => goTo("home")} />}
-          {activeTool === "email" && <EmailAlertFlow onBack={() => goTo("home")} />}
+          {activeTool === "email" && <EmailAlertFlow initialChatSummary={emailSummary} onBack={() => goTo("home")} />}
           {activeTool === "legal" && <LegalFlow onBack={() => goTo("home")} />}
           {activeTool === "health" && <HealthFlow onBack={() => goTo("home")} />}
           {activeTool === "responder" && <ResponderFlow onBack={() => goTo("home")} />}
           {activeTool === "caller" && <TrustedCallerFlow onBack={() => goTo("home")} />}
-          {activeTool === "messages" && <DirectMessagesFlow onBack={() => goTo("home")} />}
+          {activeTool === "messages" && <DirectMessagesFlow onBack={() => goTo("home")} onPrepareAlert={prepareEmailAlert} />}
 
           {activeTool === "home" && (
             <>

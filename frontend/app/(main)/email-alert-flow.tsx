@@ -5,6 +5,7 @@ import { ArrowLeft, Check, Mail, Send, Trash2 } from "lucide-react";
 
 type EmailAlertFlowProps = {
   onBack: () => void;
+  initialChatSummary?: string;
 };
 
 type RecipientType = "trusted" | "women_support";
@@ -97,14 +98,14 @@ async function submitEmailToBackend(payload: EmailPayload): Promise<EmailAlertRe
   return body as EmailAlertResponse;
 }
 
-export default function EmailAlertFlow({ onBack }: EmailAlertFlowProps) {
+export default function EmailAlertFlow({ onBack, initialChatSummary = "" }: EmailAlertFlowProps) {
   const [recipientType, setRecipientType] = useState<RecipientType>("trusted");
   const [trustedEmail, setTrustedEmail] = useState("");
   const [userName, setUserName] = useState("");
   const [location, setLocation] = useState("");
   const [situation, setSituation] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [chatSummary, setChatSummary] = useState("");
+  const [chatSummary, setChatSummary] = useState(initialChatSummary);
   const [confirmation, setConfirmation] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
